@@ -1,0 +1,18 @@
+# Xcode / Swift build artifacts
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# macOS
+.DS_Store
+*.app/
+
+# IDE
+.vscode/
+.idea/
+
+# Gemini/AntiGravity
+.gemini/
