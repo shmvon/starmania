@@ -226,6 +226,15 @@ struct PopoverView: View {
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.tertiary)
                         Spacer()
+                        Button(action: {
+                            NSApp.sendAction(NSSelectorFromString("showSettingsMenu"), to: nil, from: nil)
+                        }) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Settings & API Key")
                     }
                     .padding(.horizontal, 10)
                     
@@ -240,15 +249,19 @@ struct PopoverView: View {
                     .frame(height: 280)  // ~7cm for lyrics
                 }
             } else {
-                VStack(spacing: 2) {
+                VStack(spacing: 4) {
                     Text("No lyrics")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
-                    if !settings.hasGeniusKey {
-                        Text("⌥-click for settings")
+                    
+                    Button(action: {
+                        NSApp.sendAction(NSSelectorFromString("showSettingsMenu"), to: nil, from: nil)
+                    }) {
+                        Label("Settings / API Key", systemImage: "gearshape.fill")
                             .font(.system(size: 9))
-                            .foregroundStyle(.quaternary)
+                            .foregroundStyle(.secondary)
                     }
+                    .buttonStyle(.plain)
                 }
                 .padding(.vertical, 8)
             }
@@ -423,12 +436,19 @@ struct PopoverView: View {
     }
     
     private func writeLyricsToFile(_ track: TrackInfo) {
-        guard let path = track.filePath else { return }
-        do {
-            try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
-            showStatus("Lyrics → ID3 ✓")
-        } catch {
-            showStatus("Error: \(error.localizedDescription)")
+        // Write to Apple Music database so it shows up in Music.app
+        music.setLyrics(lyrics)
+        
+        // Also write to ID3 tag directly as a backup for local files
+        if let path = track.filePath {
+            do {
+                try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
+                showStatus("Lyrics → Music & ID3 ✓")
+            } catch {
+                showStatus("Lyrics → Music ✓ (ID3 err)")
+            }
+        } else {
+            showStatus("Lyrics → Music ✓")
         }
     }
     

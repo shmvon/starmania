@@ -47,7 +47,7 @@ struct AppSettings: Codable {
     var autoWriteArtwork: Bool   // Auto-write artwork to file if empty
     
     static let `default` = AppSettings(
-        geniusAPIKey: "",
+        geniusAPIKey: "y79GjLg6mJjW2kzbrWqbHgc17HCjdCFr9VZvegXK2an0VC0z70AkgeIs_jWPfZf5",
         autoFetchLyrics: false,
         autoFetchArtwork: false,
         autoWriteLyrics: false,

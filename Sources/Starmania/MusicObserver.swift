@@ -234,6 +234,25 @@ class MusicObserver: ObservableObject {
         poll()
     }
     
+    func setLyrics(_ lyrics: String) {
+        // Escape quotes and backslashes for AppleScript string
+        let escaped = lyrics
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                set lyrics of current track to "\(escaped)"
+            end try
+        end tell
+        """)
+        
+        // Update local state without waiting for poll
+        currentTrack?.embeddedLyrics = lyrics
+        poll()
+    }
+    
     // MARK: - Playback Controls
     
     func playPause() {

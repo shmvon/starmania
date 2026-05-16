@@ -43,12 +43,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         
-        // Check if Genius API key is set, prompt on first launch
-        if !SettingsManager.shared.hasGeniusKey {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.showGeniusKeySetup()
-            }
-        }
     }
     
     // MARK: - Status Item
@@ -237,7 +231,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - Settings Menu (Alt-Click / Right-Click)
     
-    private func showSettingsMenu() {
+    @objc func showSettingsMenu() {
         let menu = NSMenu()
         
         // Auto-fetch Lyrics toggle
@@ -342,7 +336,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "Starmania"
-        alert.informativeText = "A macOS menu bar app to manage Apple Music song metadata.\n\nStar ratings, artwork, and lyrics from Genius."
+        alert.informativeText = "A macOS menu bar app to manage Apple Music song metadata.\n\nStar ratings, artwork, and lyrics from Genius (genius.com)."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()

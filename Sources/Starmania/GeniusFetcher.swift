@@ -37,10 +37,19 @@ class GeniusFetcher: @unchecked Sendable {
         }
         
         // Step 2: Scrape lyrics from the Genius page
-        let lyrics = try await scrapeLyrics(from: pageURL)
+        let rawLyrics = try await scrapeLyrics(from: pageURL)
+        
+        // Format the lyrics exactly as requested
+        let formattedLyrics = """
+        \(artistName) - \(songTitle)
+        
+        \(rawLyrics)
+        
+        Lyrics: \(pageURL)
+        """
         
         return LyricsResult(
-            lyrics: lyrics,
+            lyrics: formattedLyrics,
             geniusURL: pageURL,
             songTitle: songTitle,
             artistName: artistName
@@ -66,8 +75,18 @@ class GeniusFetcher: @unchecked Sendable {
         
         let doc = try SwiftSoup.parse(html)
         
+        // Preserve newlines before calling .text()
+        for br in try doc.select("br") {
+            try br.append("\\n")
+        }
+        for div in try doc.select("div") {
+            try div.append("\\n")
+        }
+        for p in try doc.select("p") {
+            try p.prepend("\\n\\n")
+        }
+        
         // Genius uses div[data-lyrics-container="true"] for lyrics
-        // Try multiple selectors as fallback
         let selectors = [
             "div[data-lyrics-container=\"true\"]",
             "div.lyrics",
@@ -77,25 +96,33 @@ class GeniusFetcher: @unchecked Sendable {
         for selector in selectors {
             let elements = try doc.select(selector)
             if !elements.isEmpty() {
-                // Get HTML content, replace <br> with newlines, then strip tags
                 var lyricsText = ""
                 for element in elements {
-                    // Replace <br> tags with newlines before getting text
-                    let innerHtml = try element.html()
-                    let withNewlines = innerHtml
-                        .replacingOccurrences(of: "<br>", with: "\n")
-                        .replacingOccurrences(of: "<br/>", with: "\n")
-                        .replacingOccurrences(of: "<br />", with: "\n")
-                    
-                    // Parse the modified HTML to strip remaining tags
-                    let fragment = try SwiftSoup.parse(withNewlines)
-                    let text = try fragment.text()
-                    
-                    if !lyricsText.isEmpty { lyricsText += "\n\n" }
+                    let text = try element.text()
+                    if !lyricsText.isEmpty { lyricsText += "\\n" }
                     lyricsText += text
                 }
                 
-                let cleaned = lyricsText.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Convert literal \n markers back to actual newlines
+                var cleaned = lyricsText.replacingOccurrences(of: "\\n", with: "\n")
+                
+                // Clean up spacing around newlines
+                cleaned = cleaned.replacingOccurrences(of: " \n", with: "\n")
+                cleaned = cleaned.replacingOccurrences(of: "\n ", with: "\n")
+                
+                // Remove the prefix header (e.g. "2 Contributors In Het Gras Lyrics", or "Translations...")
+                // We use a regex to strip everything from the start up to the word "Lyrics" if it occurs in the first 100 characters.
+                let headerRegex = "^(?:\\d*\\s*Contributors?\\s*|Translations.*?\\s*)?.*?Lyrics\\s*"
+                if let range = cleaned.range(of: headerRegex, options: [.regularExpression, .caseInsensitive]) {
+                    if range.lowerBound == cleaned.startIndex {
+                        cleaned.removeSubrange(range)
+                    }
+                }
+                
+                // Collapse multiple newlines to a maximum of two
+                cleaned = cleaned.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+                
+                cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !cleaned.isEmpty {
                     return cleaned
                 }
