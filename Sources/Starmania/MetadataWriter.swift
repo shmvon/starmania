@@ -67,13 +67,14 @@ class MetadataWriter: @unchecked Sendable {
     private func writeID3(filePath: String, lyrics: String?, artworkData: Data?) throws {
         let editor = ID3TagEditor()
         let existingTag = try? editor.read(from: filePath)
-        var frames: [FrameName: ID3Frame] = existingTag?.frames ?? [:]
+        
+        var tag = existingTag ?? ID32v3TagBuilder().build()
         
         // Handle lyrics
         if let lyrics = lyrics {
-            removeAllLyricsFrames(&frames)
+            removeAllLyricsFrames(&tag.frames)
             if !lyrics.isEmpty {
-                frames[.unsynchronizedLyrics(.eng)] = ID3FrameWithLocalizedContent(
+                tag.frames[.unsynchronizedLyrics(.eng)] = ID3FrameWithLocalizedContent(
                     language: .eng,
                     contentDescription: "Lyrics",
                     content: lyrics
@@ -83,9 +84,9 @@ class MetadataWriter: @unchecked Sendable {
         
         // Handle artwork
         if let artworkData = artworkData {
-            removeAllArtworkFrames(&frames)
+            removeAllArtworkFrames(&tag.frames)
             if !artworkData.isEmpty {
-                frames[.attachedPicture(.frontCover)] = ID3FrameAttachedPicture(
+                tag.frames[.attachedPicture(.frontCover)] = ID3FrameAttachedPicture(
                     picture: artworkData,
                     type: .frontCover,
                     format: detectImageFormat(artworkData)
@@ -93,14 +94,9 @@ class MetadataWriter: @unchecked Sendable {
             }
         }
         
-        guard !frames.isEmpty else {
+        guard !tag.frames.isEmpty else {
             throw MetadataError.writeError("No metadata to write")
         }
-        
-        let tag = ID32v3TagBuilder()
-            .title(frame: ID3FrameWithStringContent(content: ""))
-            .build()
-        tag.frames = frames
         
         try editor.write(tag: tag, to: filePath)
     }

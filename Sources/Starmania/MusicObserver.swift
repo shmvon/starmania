@@ -304,7 +304,7 @@ class MusicObserver: ObservableObject {
     /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
     func fetchPlaylistTracks() -> [PlaylistTrackInfo] {
         // Step 1: Get track count and current track index
-        // Try "current playlist" first (works for playlists), fallback to "container of current track" (works for albums)
+        // Try to identify if we are playing an album or playlist, using fast checks
         let infoScript = """
         tell application "Music"
             try
@@ -312,21 +312,58 @@ class MusicObserver: ObservableObject {
                 set ctName to name of ct
                 set ctArtist to artist of ct
                 
-                -- Try current playlist first
+                -- Check if playing an album from the main library playlist
+                try
+                    set plName to name of current playlist
+                    if plName is "Music" or plName is "Library" then
+                        set ctAlbum to album of ct
+                        set ctArtist to artist of ct
+                        if ctAlbum is not "" then
+                            set trackList to (every track of current playlist whose album is ctAlbum and artist is ctArtist)
+                            set total to count of trackList
+                            set idx to 0
+                            repeat with i from 1 to total
+                                set t to item i of trackList
+                                if name of t is ctName then
+                                    set idx to i
+                                    exit repeat
+                                end if
+                            end repeat
+                            if idx > 0 then
+                                return (idx as string) & "|||" & (total as string) & "|||album"
+                            end if
+                        end if
+                    end if
+                end try
+
+                -- Try current playlist next (standard playlist)
                 try
                     set src to current playlist
                     set total to count of tracks of src
-                    -- Find current track index by matching name + artist
-                    set idx to 0
-                    repeat with i from 1 to total
-                        set t to track i of src
+                    set idx to index of ct
+                    -- Fast O(1) verification: check if track at this index matches ctName and ctArtist
+                    set verified to false
+                    try
+                        set t to track idx of src
                         if name of t is ctName and artist of t is ctArtist then
-                            set idx to i
-                            exit repeat
+                            set verified to true
                         end if
-                    end repeat
-                    if idx > 0 then
+                    end try
+                    if verified then
                         return (idx as string) & "|||" & (total as string) & "|||playlist"
+                    else if total < 100 then
+                        -- Only loop if playlist is small
+                        set foundIdx to 0
+                        repeat with i from 1 to total
+                            set t to track i of src
+                            if name of t is ctName and artist of t is ctArtist then
+                                set foundIdx to i
+                                exit repeat
+                            end if
+                        end repeat
+                        if foundIdx > 0 then
+                            return (foundIdx as string) & "|||" & (total as string) & "|||playlist"
+                        end if
                     end if
                 end try
                 
@@ -358,7 +395,7 @@ class MusicObserver: ObservableObject {
             return []
         }
         
-        let sourceType = parts[2]  // "playlist" or "container"
+        let sourceType = parts[2]  // "album", "playlist", or "container"
         
         // Calculate window: up to 40 tracks centered on current track
         let windowSize = 40
@@ -379,39 +416,72 @@ class MusicObserver: ObservableObject {
         }
         
         // Step 2: Fetch track data for the window
-        // Build the source reference depending on which method worked
-        let sourceRef = sourceType == "playlist" ? "current playlist" : "container of current track"
-        
-        let fetchScript = """
-        tell application "Music"
-            try
-                set ct to current track
-                set ctName to name of ct
-                set ctArtist to artist of ct
-                set src to \(sourceRef)
-                set trackList to tracks \(startIndex) thru \(endIndex) of src
-                set output to ""
-                repeat with t in trackList
-                    set trackName to name of t
-                    set trackArtist to artist of t
-                    set isFav to favorited of t
-                    set isDis to disliked of t
-                    set trackRating to rating of t
-                    set trackIdx to index of t
-                    set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                    set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
-                    if output is "" then
-                        set output to line
-                    else
-                        set output to output & "^^^" & line
-                    end if
-                end repeat
-                return output
-            on error errMsg
-                return "ERROR:" & errMsg
-            end try
-        end tell
-        """
+        let fetchScript: String
+        if sourceType == "album" {
+            fetchScript = """
+            tell application "Music"
+                try
+                    set ct to current track
+                    set ctName to name of ct
+                    set ctArtist to artist of ct
+                    set ctAlbum to album of ct
+                    set trackList to (every track of current playlist whose album is ctAlbum and artist is ctArtist)
+                    set trackListWindow to items \(startIndex) thru \(endIndex) of trackList
+                    set output to ""
+                    repeat with t in trackListWindow
+                        set trackName to name of t
+                        set trackArtist to artist of t
+                        set isFav to favorited of t
+                        set isDis to disliked of t
+                        set trackRating to rating of t
+                        set trackIdx to index of t
+                        set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
+                        set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
+                        if output is "" then
+                            set output to line
+                        else
+                            set output to output & "^^^" & line
+                        end if
+                    end repeat
+                    return output
+                on error errMsg
+                    return "ERROR:" & errMsg
+                end try
+            end tell
+            """
+        } else {
+            let sourceRef = sourceType == "playlist" ? "current playlist" : "container of current track"
+            fetchScript = """
+            tell application "Music"
+                try
+                    set ct to current track
+                    set ctName to name of ct
+                    set ctArtist to artist of ct
+                    set src to \(sourceRef)
+                    set trackListWindow to tracks \(startIndex) thru \(endIndex) of src
+                    set output to ""
+                    repeat with t in trackListWindow
+                        set trackName to name of t
+                        set trackArtist to artist of t
+                        set isFav to favorited of t
+                        set isDis to disliked of t
+                        set trackRating to rating of t
+                        set trackIdx to index of t
+                        set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
+                        set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
+                        if output is "" then
+                            set output to line
+                        else
+                            set output to output & "^^^" & line
+                        end if
+                    end repeat
+                    return output
+                on error errMsg
+                    return "ERROR:" & errMsg
+                end try
+            end tell
+            """
+        }
         
         guard let result = runAppleScript(fetchScript), !result.hasPrefix("ERROR:") else {
             print("[Starmania] Playlist fetch script failed")

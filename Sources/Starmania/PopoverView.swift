@@ -287,6 +287,7 @@ struct PopoverView: View {
                         RoundedRectangle(cornerRadius: 5)
                             .fill(showPlaylist ? Color.clear : Color.primary.opacity(0.1))
                     )
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Lyrics")
@@ -304,6 +305,7 @@ struct PopoverView: View {
                         RoundedRectangle(cornerRadius: 5)
                             .fill(showPlaylist ? Color.primary.opacity(0.1) : Color.clear)
                     )
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Playlist")
@@ -560,6 +562,10 @@ struct PopoverView: View {
         lyricsError = nil
         statusMessage = nil
         statusIsError = false
+        
+        if showPlaylist {
+            loadPlaylist()
+        }
         
         guard let track = music.currentTrack else {
             lyrics = ""
