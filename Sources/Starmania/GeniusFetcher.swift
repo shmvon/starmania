@@ -10,7 +10,13 @@ class GeniusFetcher: @unchecked Sendable {
     /// Search Genius for a song and scrape its lyrics.
     func fetchLyrics(title: String, artist: String, apiKey: String) async throws -> LyricsResult {
         // Step 1: Search via Genius API
-        let query = "\(artist) \(title)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let cleanTitle = title.replacingOccurrences(of: "'", with: " ")
+                              .replacingOccurrences(of: "‘", with: " ")
+                              .replacingOccurrences(of: "’", with: " ")
+                              .replacingOccurrences(of: "-", with: " ")
+        let cleanArtist = artist.replacingOccurrences(of: "'", with: " ")
+        
+        let query = "\(cleanArtist) \(cleanTitle)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let searchURL = URL(string: "https://api.genius.com/search?q=\(query)")!
         
         var request = URLRequest(url: searchURL)
@@ -27,7 +33,65 @@ class GeniusFetcher: @unchecked Sendable {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let responseDict = json["response"] as? [String: Any],
               let hits = responseDict["hits"] as? [[String: Any]],
-              let firstHit = hits.first,
+              !hits.isEmpty else {
+            throw GeniusError.noResults("No results found for '\(title)' by '\(artist)'")
+        }
+        
+        let keywords = ["traduzion", "translati", "traducción", "traduction", "übersetzung"]
+        var filteredHits = hits.filter { hit in
+            guard let result = hit["result"] as? [String: Any] else { return false }
+            let hitTitle = (result["title"] as? String)?.lowercased() ?? ""
+            let hitFullTitle = (result["full_title"] as? String)?.lowercased() ?? ""
+            let artistName = ((result["primary_artist"] as? [String: Any])?["name"] as? String)?.lowercased() ?? ""
+            
+            let combined = "\(hitTitle) \(hitFullTitle) \(artistName)"
+            return !keywords.contains { combined.contains($0) }
+        }
+        
+        if filteredHits.isEmpty {
+            filteredHits = hits
+        }
+        
+        // Ensure artist matches
+        let searchArtist = artist.lowercased()
+        let artistMatchedHits = filteredHits.filter { hit in
+            guard let result = hit["result"] as? [String: Any],
+                  let artistName = ((result["primary_artist"] as? [String: Any])?["name"] as? String)?.lowercased() else { return false }
+            return artistName.contains(searchArtist) || searchArtist.contains(artistName)
+        }
+        
+        if !artistMatchedHits.isEmpty {
+            filteredHits = artistMatchedHits
+        }
+        
+        // Ensure title roughly matches (ignoring quotes and spaces)
+        let cleanSearchTitle = title.lowercased()
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "‘", with: "")
+            .replacingOccurrences(of: "’", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            
+        let titleMatchedHits = filteredHits.filter { hit in
+            guard let result = hit["result"] as? [String: Any],
+                  let hitTitle = (result["title"] as? String)?.lowercased()
+                    .replacingOccurrences(of: "'", with: "")
+                    .replacingOccurrences(of: "‘", with: "")
+                    .replacingOccurrences(of: "’", with: "")
+                    .replacingOccurrences(of: " ", with: "") else { return false }
+            return hitTitle.contains(cleanSearchTitle) || cleanSearchTitle.contains(hitTitle)
+        }
+        
+        if !titleMatchedHits.isEmpty {
+            filteredHits = titleMatchedHits
+        }
+        
+        let bestHit = filteredHits.min { a, b in
+            let titleA = (a["result"] as? [String: Any])?["title"] as? String ?? ""
+            let titleB = (b["result"] as? [String: Any])?["title"] as? String ?? ""
+            return abs(titleA.count - title.count) < abs(titleB.count - title.count)
+        }
+        
+        guard let firstHit = bestHit,
               let result = firstHit["result"] as? [String: Any],
               let pageURL = result["url"] as? String,
               let songTitle = result["title"] as? String,
@@ -111,9 +175,22 @@ class GeniusFetcher: @unchecked Sendable {
                 cleaned = cleaned.replacingOccurrences(of: "\n ", with: "\n")
                 
                 // Remove the prefix header (e.g. "2 Contributors In Het Gras Lyrics", or "Translations...")
-                // We use a regex to strip everything from the start up to the word "Lyrics" if it occurs in the first 100 characters.
-                let headerRegex = "^(?:\\d*\\s*Contributors?\\s*|Translations.*?\\s*)?.*?Lyrics\\s*"
+                // We use a regex to strip everything from the start up to the word "Lyrics" if it occurs in the first 200 characters.
+                // It also strips out Genius bios that end in "Read More".
+                let headerRegex = "^(?s)(?:.*?\\bLyrics\\b\\s*)?(?:.*?Read More\\s*)?"
                 if let range = cleaned.range(of: headerRegex, options: [.regularExpression, .caseInsensitive]) {
+                    if range.lowerBound == cleaned.startIndex {
+                        // Only remove if it actually matched something substantive like Lyrics or Read More
+                        let match = String(cleaned[range])
+                        if match.lowercased().contains("lyrics") || match.lowercased().contains("read more") {
+                            cleaned.removeSubrange(range)
+                        }
+                    }
+                }
+                
+                // Fallback for simple "Contributors ... Lyrics"
+                let fallbackRegex = "^(?:\\d*\\s*Contributors?\\s*|Translations.*?\\s*)?.*?Lyrics\\s*"
+                if let range = cleaned.range(of: fallbackRegex, options: [.regularExpression, .caseInsensitive]) {
                     if range.lowerBound == cleaned.startIndex {
                         cleaned.removeSubrange(range)
                     }

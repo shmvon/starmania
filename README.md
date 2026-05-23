@@ -25,7 +25,7 @@ A macOS menu bar app for managing Apple Music song metadata — star ratings, fa
 
 - macOS 14.0+
 - Swift 5.9+
-- A [Genius API](https://genius.com/api-clients) client access token (free) for lyrics fetching
+- A [Genius API](https://genius.com/api-clients) client access token (optional, a default one is pre-configured for lyrics fetching)
 
 ## Build & Run
 
@@ -46,12 +46,14 @@ cp Info.plist Starmania.app/Contents/
 open Starmania.app
 ```
 
-## Genius API Setup
+## Genius API Setup (Optional)
+
+Starmania comes pre-configured with a default Genius API key. If you reach the rate limit or prefer to use your own:
 
 1. Go to [genius.com/api-clients](https://genius.com/api-clients)
 2. Create a new API client (use `https://github.com/shmvon/starmania` as app URL)
 3. Copy the **Client Access Token**
-4. ⌥-click the Starmania icon → "Set Genius API Key..." → paste
+4. Click the gear icon (⚙) in the Starmania lyrics panel → "Set API Key..." → paste
 
 ## Architecture
 

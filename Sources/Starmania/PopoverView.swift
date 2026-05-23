@@ -13,7 +13,13 @@ struct PopoverView: View {
     @State private var lyricsError: String?
     @State private var showPlaybackControls: Bool = false
     @State private var statusMessage: String?
+    @State private var statusIsError: Bool = false
     @State private var didInitialLoad: Bool = false
+    @State private var isOptionPressed: Bool = false
+    @State private var activeLyricsRequestID = UUID()
+    @State private var pendingLyricsFileWrites: [String: String] = [:]
+    
+    let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     
     enum LyricsSource {
         case none
@@ -28,9 +34,15 @@ struct PopoverView: View {
             if let track = music.currentTrack {
                 trackView(track)
             } else if music.musicRunning {
-                emptyState("No track playing", icon: "pause.circle")
+                emptyState("No track playing", icon: "pause.circle", actionTitle: "Play Music") {
+                    music.play()
+                }
             } else {
-                emptyState("Music not running", icon: "music.note")
+                emptyState("Music not running", icon: "music.note", actionTitle: "Open Apple Music") {
+                    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Music") {
+                        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+                    }
+                }
             }
         }
         .frame(width: panelWidth)
@@ -47,6 +59,12 @@ struct PopoverView: View {
             if !didInitialLoad {
                 didInitialLoad = true
                 onTrackChanged()
+            }
+        }
+        .onReceive(timer) { _ in
+            let pressed = NSEvent.modifierFlags.contains(.option)
+            if pressed != isOptionPressed {
+                isOptionPressed = pressed
             }
         }
     }
@@ -96,7 +114,7 @@ struct PopoverView: View {
             if let msg = statusMessage {
                 Text(msg)
                     .font(.system(size: 10))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(statusIsError ? .red : .green)
                     .transition(.opacity)
             }
             
@@ -208,6 +226,9 @@ struct PopoverView: View {
     
     private func lyricsSection() -> some View {
         VStack(spacing: 2) {
+            lyricsHeader()
+                .padding(.horizontal, 10)
+
             if lyricsLoading {
                 ProgressView("Fetching...")
                     .font(.system(size: 11))
@@ -220,51 +241,50 @@ struct PopoverView: View {
                     .padding(.vertical, 8)
                     .padding(.horizontal, 10)
             } else if !lyrics.isEmpty {
-                VStack(spacing: 2) {
-                    HStack {
-                        Text(lyricsSource == .embedded ? "LYRICS (EMBEDDED)" : "LYRICS (GENIUS)")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                        Spacer()
-                        Button(action: {
-                            NSApp.sendAction(NSSelectorFromString("showSettingsMenu"), to: nil, from: nil)
-                        }) {
-                            Image(systemName: "gearshape.fill")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Settings & API Key")
-                    }
-                    .padding(.horizontal, 10)
-                    
-                    ScrollView {
-                        Text(lyrics)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.primary.opacity(0.85))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                    }
-                    .frame(height: 280)  // ~7cm for lyrics
+                ScrollView {
+                    Text(lyrics)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.primary.opacity(0.85))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
                 }
+                .frame(height: 280)  // ~7cm for lyrics
             } else {
-                VStack(spacing: 4) {
-                    Text("No lyrics")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    
-                    Button(action: {
-                        NSApp.sendAction(NSSelectorFromString("showSettingsMenu"), to: nil, from: nil)
-                    }) {
-                        Label("Settings / API Key", systemImage: "gearshape.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.vertical, 8)
+                Text("No lyrics")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 8)
             }
+        }
+    }
+
+    private func lyricsHeader() -> some View {
+        HStack {
+            Text(lyricsHeaderTitle)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.tertiary)
+            Spacer()
+            Button(action: {
+                NSApp.sendAction(NSSelectorFromString("showSettingsMenu"), to: nil, from: nil)
+            }) {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Settings & API Key")
+        }
+    }
+
+    private var lyricsHeaderTitle: String {
+        switch lyricsSource {
+        case .embedded:
+            return "LYRICS (EMBEDDED)"
+        case .genius:
+            return "LYRICS (GENIUS)"
+        case .none:
+            return "LYRICS"
         }
     }
     
@@ -295,23 +315,37 @@ struct PopoverView: View {
             // Row 2: Write to ID3 tag (left=lyrics, right=artwork)
             if track.isLocal {
                 HStack(spacing: 4) {
-                    Button(action: { writeLyricsToFile(track) }) {
-                        Label("Write Lyrics", systemImage: "tag")
+                    Button(action: {
+                        if isOptionPressed {
+                            deleteLyricsFromFile(track)
+                        } else {
+                            writeLyricsToFile(track)
+                        }
+                    }) {
+                        Label(isOptionPressed ? "Delete Lyrics" : "Write Lyrics", systemImage: isOptionPressed ? "trash" : "tag")
                             .font(.system(size: 10, weight: .medium))
                             .frame(maxWidth: .infinity)
+                            .foregroundStyle(isOptionPressed ? .red : .primary)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(lyrics.isEmpty)
+                    .disabled(lyrics.isEmpty && !isOptionPressed)
                     
-                    Button(action: { writeArtworkToFile(track) }) {
-                        Label("Write Artwork", systemImage: "tag")
+                    Button(action: {
+                        if isOptionPressed {
+                            deleteArtworkFromFile(track)
+                        } else {
+                            writeArtworkToFile(track)
+                        }
+                    }) {
+                        Label(isOptionPressed ? "Delete Artwork" : "Write Artwork", systemImage: isOptionPressed ? "trash" : "tag")
                             .font(.system(size: 10, weight: .medium))
                             .frame(maxWidth: .infinity)
+                            .foregroundStyle(isOptionPressed ? .red : .primary)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(track.artworkData == nil)
+                    .disabled(track.artworkData == nil && !isOptionPressed)
                 }
             }
             
@@ -340,7 +374,7 @@ struct PopoverView: View {
     
     // MARK: - Empty State
     
-    private func emptyState(_ message: String, icon: String) -> some View {
+    private func emptyState(_ message: String, icon: String, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
         VStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.system(size: 28))
@@ -348,6 +382,16 @@ struct PopoverView: View {
             Text(message)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+            
+            if let title = actionTitle, let act = action {
+                Button(action: act) {
+                    Text(title)
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .padding(.top, 4)
+            }
         }
         .frame(width: panelWidth, height: 120)
     }
@@ -355,10 +399,20 @@ struct PopoverView: View {
     // MARK: - Actions
     
     private func onTrackChanged() {
+        flushPendingLyricsFileWrites()
+        invalidateLyricsRequest()
+        lyricsLoading = false
         lyricsError = nil
         statusMessage = nil
+        statusIsError = false
         
-        if let track = music.currentTrack, let embedded = track.embeddedLyrics, !embedded.isEmpty {
+        guard let track = music.currentTrack else {
+            lyrics = ""
+            lyricsSource = .none
+            return
+        }
+        
+        if let embedded = normalizedLyrics(track.embeddedLyrics) {
             lyrics = embedded
             lyricsSource = .embedded
             return
@@ -367,9 +421,11 @@ struct PopoverView: View {
         lyrics = ""
         lyricsSource = .none
         
-        if settings.settings.autoFetchLyrics && settings.hasGeniusKey {
-            fetchLyrics()
+        guard settings.settings.autoFetchLyrics, settings.hasGeniusKey else {
+            return
         }
+        
+        startLyricsFetch(for: track)
     }
     
     private func fetchLyrics() {
@@ -379,27 +435,73 @@ struct PopoverView: View {
             return
         }
         
-        lyricsLoading = true
-        lyricsError = nil
+        startLyricsFetch(for: track)
+    }
+    
+    private func startLyricsFetch(for track: TrackInfo) {
+        let requestID = UUID()
+        activeLyricsRequestID = requestID
         
         Task {
-            do {
-                let result = try await GeniusFetcher.shared.fetchLyrics(
-                    title: track.name,
-                    artist: track.artist,
-                    apiKey: settings.settings.geniusAPIKey
-                )
-                await MainActor.run {
-                    self.lyrics = result.lyrics
-                    self.lyricsSource = .genius
-                    self.lyricsLoading = false
-                }
-            } catch {
-                await MainActor.run {
-                    self.lyricsError = error.localizedDescription
-                    self.lyricsLoading = false
+            let result = await fetchLyrics(for: track, requestID: requestID)
+            guard let result else { return }
+
+            // Evaluate activity and auto-write checks on the MainActor sequentially
+            let isActive = await MainActor.run { isActiveLyricsRequest(requestID, for: track) }
+            guard isActive else { return }
+
+            let shouldAutoWrite = await MainActor.run { shouldAutoWriteFetchedLyrics(for: track) }
+            guard shouldAutoWrite else { return }
+
+            await MainActor.run {
+                writeLyricsToFile(track, lyrics: result.lyrics)
+            }
+        }
+    }
+    
+    private func fetchLyrics(for track: TrackInfo, requestID: UUID) async -> LyricsResult? {
+        guard settings.hasGeniusKey else {
+            await MainActor.run {
+                if activeLyricsRequestID == requestID {
+                    lyricsError = "No Genius API key"
+                    lyricsLoading = false
                 }
             }
+            return nil
+        }
+        
+        await MainActor.run {
+            guard isActiveLyricsRequest(requestID, for: track) else { return }
+            lyricsLoading = true
+            lyricsError = nil
+        }
+        
+        do {
+            let result = try await GeniusFetcher.shared.fetchLyrics(
+                title: track.name,
+                artist: track.artist,
+                apiKey: settings.settings.geniusAPIKey
+            )
+            let shouldApply = await MainActor.run {
+                isActiveLyricsRequest(requestID, for: track)
+            }
+            guard shouldApply else { return nil }
+            await MainActor.run {
+                self.lyrics = result.lyrics
+                self.lyricsSource = .genius
+                self.lyricsLoading = false
+            }
+            return result
+        } catch {
+            let shouldApply = await MainActor.run {
+                isActiveLyricsRequest(requestID, for: track)
+            }
+            guard shouldApply else { return nil }
+            await MainActor.run {
+                self.lyricsError = error.localizedDescription
+                self.lyricsLoading = false
+            }
+            return nil
         }
     }
     
@@ -436,19 +538,68 @@ struct PopoverView: View {
     }
     
     private func writeLyricsToFile(_ track: TrackInfo) {
-        // Write to Apple Music database so it shows up in Music.app
-        music.setLyrics(lyrics)
-        
-        // Also write to ID3 tag directly as a backup for local files
+        writeLyricsToFile(track, lyrics: lyrics)
+    }
+    
+    private func writeLyricsToFile(_ track: TrackInfo, lyrics: String) {
         if let path = track.filePath {
-            do {
-                try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
-                showStatus("Lyrics → Music & ID3 ✓")
-            } catch {
-                showStatus("Lyrics → Music ✓ (ID3 err)")
+            // Writing metadata on the active Music track can interrupt playback,
+            // so local tracks are persisted via the file tag only.
+            if shouldDeferLyricsFileWrite(for: track) {
+                pendingLyricsFileWrites[path] = lyrics
+                music.currentTrack?.embeddedLyrics = lyrics
+                showStatus("Lyrics queued for file write ✓")
+            } else {
+                do {
+                    try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
+                    music.currentTrack?.embeddedLyrics = lyrics
+                    showStatus("Lyrics → File ✓")
+                } catch {
+                    showStatus("Lyrics write failed", isError: true)
+                }
             }
         } else {
+            music.setLyrics(lyrics)
             showStatus("Lyrics → Music ✓")
+        }
+    }
+    
+    private func invalidateLyricsRequest() {
+        activeLyricsRequestID = UUID()
+    }
+    
+    private func isActiveLyricsRequest(_ requestID: UUID, for track: TrackInfo) -> Bool {
+        activeLyricsRequestID == requestID && music.currentTrack?.trackKey == track.trackKey
+    }
+    
+    private func normalizedLyrics(_ lyrics: String?) -> String? {
+        guard let lyrics else { return nil }
+        let trimmed = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+    
+    private func shouldAutoWriteFetchedLyrics(for track: TrackInfo) -> Bool {
+        guard settings.settings.autoWriteLyrics else { return false }
+        return track.isLocal
+    }
+
+    private func shouldDeferLyricsFileWrite(for track: TrackInfo) -> Bool {
+        guard let path = track.filePath else { return false }
+        return music.currentTrack?.filePath == path
+    }
+
+    private func flushPendingLyricsFileWrites() {
+        let currentPath = music.currentTrack?.filePath
+        let writesToFlush = pendingLyricsFileWrites.filter { $0.key != currentPath }
+        guard !writesToFlush.isEmpty else { return }
+
+        for (path, lyrics) in writesToFlush {
+            do {
+                try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
+                pendingLyricsFileWrites.removeValue(forKey: path)
+            } catch {
+                showStatus("Deferred lyrics write failed", isError: true)
+            }
         }
     }
     
@@ -459,6 +610,42 @@ struct PopoverView: View {
             showStatus("Artwork → ID3 ✓")
         } catch {
             showStatus("Error: \(error.localizedDescription)")
+        }
+    }
+    
+    private func deleteLyricsFromFile(_ track: TrackInfo) {
+        if let path = track.filePath {
+            if shouldDeferLyricsFileWrite(for: track) {
+                pendingLyricsFileWrites[path] = ""
+                music.currentTrack?.embeddedLyrics = nil
+                showStatus("Lyrics deletion queued ✓", isError: true)
+            } else {
+                do {
+                    try MetadataWriter.shared.writeToFile(filePath: path, lyrics: "", artworkData: nil)
+                    music.currentTrack?.embeddedLyrics = nil
+                    showStatus("Lyrics deleted ✓", isError: true)
+                } catch {
+                    showStatus("Lyrics deleted (ID3 err)", isError: true)
+                }
+            }
+        } else {
+            music.setLyrics("")
+            showStatus("Lyrics deleted ✓", isError: true)
+        }
+    }
+    
+    private func deleteArtworkFromFile(_ track: TrackInfo) {
+        music.deleteArtwork()
+        
+        if let path = track.filePath {
+            do {
+                try MetadataWriter.shared.writeToFile(filePath: path, lyrics: nil, artworkData: Data())
+                showStatus("Artwork deleted ✓", isError: true)
+            } catch {
+                showStatus("Artwork deleted (ID3 err)", isError: true)
+            }
+        } else {
+            showStatus("Artwork deleted ✓", isError: true)
         }
     }
     
@@ -477,11 +664,13 @@ struct PopoverView: View {
         showStatus("Artwork copied ✓")
     }
     
-    private func showStatus(_ message: String) {
-        withAnimation { statusMessage = message }
+    private func showStatus(_ message: String, isError: Bool = false) {
+        withAnimation { 
+            statusMessage = message
+            statusIsError = isError
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             withAnimation { statusMessage = nil }
         }
     }
 }
-

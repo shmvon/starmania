@@ -253,7 +253,29 @@ class MusicObserver: ObservableObject {
         poll()
     }
     
+    func deleteArtwork() {
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                delete artworks of current track
+            end try
+        end tell
+        """)
+        currentTrack?.artworkData = nil
+        poll()
+    }
+    
     // MARK: - Playback Controls
+    
+    func play() {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Music") {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+        }
+        let _ = runAppleScript("tell application \"Music\" to play")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.poll()
+        }
+    }
     
     func playPause() {
         let _ = runAppleScript("tell application \"Music\" to playpause")

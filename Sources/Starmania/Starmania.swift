@@ -93,13 +93,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let xFont = NSFont.systemFont(ofSize: xSize, weight: .semibold)
         
         guard let track = track else {
-            // No track: draw a dash
-            let dashFont = NSFont.systemFont(ofSize: 16, weight: .light)
-            let dashStr: NSString = "–"
-            let dashBounds = dashStr.size(withAttributes: [.font: dashFont])
-            let image = NSImage(size: NSSize(width: ceil(dashBounds.width), height: menuBarHeight), flipped: false) { _ in
-                let y = (menuBarHeight - dashBounds.height) / 2
-                dashStr.draw(at: NSPoint(x: 0, y: y), withAttributes: [.font: dashFont])
+            // No track: draw an empty star
+            let starChar: NSString = "☆"
+            let starBounds = starChar.size(withAttributes: [.font: starFont])
+            let image = NSImage(size: NSSize(width: ceil(starBounds.width), height: menuBarHeight), flipped: false) { _ in
+                let y = (menuBarHeight - starBounds.height) / 2 - 0.5
+                starChar.draw(at: NSPoint(x: 0, y: y), withAttributes: [.font: starFont])
                 return true
             }
             image.isTemplate = true
@@ -336,7 +335,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "Starmania"
-        alert.informativeText = "A macOS menu bar app to manage Apple Music song metadata.\n\nStar ratings, artwork, and lyrics from Genius (genius.com)."
+        alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 Sem Vandekerckhove.\n\nLyrics database: genius.com."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()

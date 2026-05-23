@@ -1,7 +1,8 @@
 import Foundation
 import AppKit
+import ID3TagEditor
+import AVFoundation
 
-/// Handles writing metadata (lyrics, artwork) to audio files and exporting to Downloads.
 class MetadataWriter: @unchecked Sendable {
     static let shared = MetadataWriter()
     
@@ -14,14 +15,12 @@ class MetadataWriter: @unchecked Sendable {
         let filename = sanitizeFilename("\(artist) - \(title) - Artwork.png")
         let destURL = downloadsURL.appendingPathComponent(filename)
         
-        // Convert to PNG if needed
         if let image = NSImage(data: data),
            let tiffData = image.tiffRepresentation,
            let bitmapRep = NSBitmapImageRep(data: tiffData),
            let pngData = bitmapRep.representation(using: .png, properties: [:]) {
             try pngData.write(to: destURL)
         } else {
-            // Write raw data as-is
             try data.write(to: destURL)
         }
         
@@ -37,7 +36,7 @@ class MetadataWriter: @unchecked Sendable {
         return destURL
     }
     
-    // MARK: - ID3 Writing (placeholder for Phase 4)
+    // MARK: - ID3 Writing
     
     func writeToFile(filePath: String, lyrics: String?, artworkData: Data?) throws {
         let ext = URL(fileURLWithPath: filePath).pathExtension.lowercased()
@@ -51,22 +50,170 @@ class MetadataWriter: @unchecked Sendable {
         }
     }
     
-    /// Check if a file already has lyrics or artwork embedded
     func checkExistingMetadata(filePath: String) -> (hasLyrics: Bool, hasArtwork: Bool) {
-        // Phase 4: implement with ID3TagEditor / AVFoundation
-        return (false, false)
+        let ext = URL(fileURLWithPath: filePath).pathExtension.lowercased()
+        switch ext {
+        case "mp3":
+            return checkID3Metadata(filePath: filePath)
+        case "m4a", "m4p", "aac":
+            return checkMP4Metadata(filePath: filePath)
+        default:
+            return (false, false)
+        }
     }
     
     // MARK: - Private
     
     private func writeID3(filePath: String, lyrics: String?, artworkData: Data?) throws {
-        // Phase 4: implement with ID3TagEditor
-        print("[Starmania] ID3 writing not yet implemented")
+        let editor = ID3TagEditor()
+        let existingTag = try? editor.read(from: filePath)
+        var frames: [FrameName: ID3Frame] = existingTag?.frames ?? [:]
+        
+        // Handle lyrics
+        if let lyrics = lyrics {
+            removeAllLyricsFrames(&frames)
+            if !lyrics.isEmpty {
+                frames[.unsynchronizedLyrics(.eng)] = ID3FrameWithLocalizedContent(
+                    language: .eng,
+                    contentDescription: "Lyrics",
+                    content: lyrics
+                )
+            }
+        }
+        
+        // Handle artwork
+        if let artworkData = artworkData {
+            removeAllArtworkFrames(&frames)
+            if !artworkData.isEmpty {
+                frames[.attachedPicture(.frontCover)] = ID3FrameAttachedPicture(
+                    picture: artworkData,
+                    type: .frontCover,
+                    format: detectImageFormat(artworkData)
+                )
+            }
+        }
+        
+        guard !frames.isEmpty else {
+            throw MetadataError.writeError("No metadata to write")
+        }
+        
+        let tag = ID32v3TagBuilder()
+            .title(frame: ID3FrameWithStringContent(content: ""))
+            .build()
+        tag.frames = frames
+        
+        try editor.write(tag: tag, to: filePath)
     }
     
     private func writeMP4(filePath: String, lyrics: String?, artworkData: Data?) throws {
-        // Phase 4: implement with AVFoundation
-        print("[Starmania] MP4 writing not yet implemented")
+        let url = URL(fileURLWithPath: filePath)
+        let asset = AVAsset(url: url)
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(url.pathExtension)
+        
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        
+        let fileType: AVFileType = .m4a
+        
+        var metadataItems = asset.metadata.filter { item in
+            guard let id = item.identifier else { return false }
+            return id != .iTunesMetadataLyrics && id != .iTunesMetadataCoverArt
+        }.compactMap { $0.mutableCopy() as? AVMutableMetadataItem }
+        
+        if let lyrics = lyrics, !lyrics.isEmpty {
+            let item = AVMutableMetadataItem()
+            item.identifier = .iTunesMetadataLyrics
+            item.value = lyrics as NSString
+            item.extendedLanguageTag = "eng"
+            metadataItems.append(item)
+        }
+        
+        if let artworkData = artworkData, !artworkData.isEmpty {
+            let item = AVMutableMetadataItem()
+            item.identifier = .iTunesMetadataCoverArt
+            item.value = artworkData as NSData
+            metadataItems.append(item)
+        }
+        
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+            throw MetadataError.writeError("Could not create AVAssetExportSession")
+        }
+        
+        exportSession.outputURL = tempURL
+        exportSession.outputFileType = fileType
+        exportSession.metadata = metadataItems
+        
+        let semaphore = DispatchSemaphore(value: 0)
+        var exportError: Error?
+        
+        exportSession.exportAsynchronously {
+            exportError = exportSession.error
+            semaphore.signal()
+        }
+        
+        semaphore.wait()
+        
+        if let error = exportError {
+            throw MetadataError.writeError("Export failed: \(error.localizedDescription)")
+        }
+        
+        guard FileManager.default.fileExists(atPath: tempURL.path) else {
+            throw MetadataError.writeError("Export produced no output file")
+        }
+        
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL)
+    }
+    
+    private func checkID3Metadata(filePath: String) -> (hasLyrics: Bool, hasArtwork: Bool) {
+        let editor = ID3TagEditor()
+        guard let tag = try? editor.read(from: filePath) else {
+            return (false, false)
+        }
+        let hasLyrics = tag.frames.keys.contains { key in
+            if case .unsynchronizedLyrics = key { return true }
+            return false
+        }
+        let hasArtwork = tag.frames.keys.contains { key in
+            if case .attachedPicture = key { return true }
+            return false
+        }
+        return (hasLyrics, hasArtwork)
+    }
+    
+    private func checkMP4Metadata(filePath: String) -> (hasLyrics: Bool, hasArtwork: Bool) {
+        let url = URL(fileURLWithPath: filePath)
+        let asset = AVAsset(url: url)
+        let hasLyrics = asset.metadata.contains { $0.identifier == .iTunesMetadataLyrics }
+        let hasArtwork = asset.metadata.contains { $0.identifier == .iTunesMetadataCoverArt }
+        return (hasLyrics, hasArtwork)
+    }
+    
+    private func removeAllLyricsFrames(_ frames: inout [FrameName: ID3Frame]) {
+        let keys = frames.keys.filter { key in
+            if case .unsynchronizedLyrics = key { return true }
+            return false
+        }
+        for key in keys {
+            frames.removeValue(forKey: key)
+        }
+    }
+    
+    private func removeAllArtworkFrames(_ frames: inout [FrameName: ID3Frame]) {
+        let keys = frames.keys.filter { key in
+            if case .attachedPicture = key { return true }
+            return false
+        }
+        for key in keys {
+            frames.removeValue(forKey: key)
+        }
+    }
+    
+    private func detectImageFormat(_ data: Data) -> ID3PictureFormat {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        data.copyBytes(to: &bytes, count: min(4, data.count))
+        if bytes[0] == 0x89 && bytes[1] == 0x50 { return .png }
+        return .jpeg
     }
     
     private func sanitizeFilename(_ name: String) -> String {

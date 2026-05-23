@@ -16,3 +16,6 @@ xcuserdata/
 
 # Gemini/AntiGravity
 .gemini/
+ 
+# Local scratch files (not for repo)
+Scratch/
