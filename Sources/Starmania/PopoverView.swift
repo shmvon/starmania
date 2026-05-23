@@ -339,6 +339,7 @@ struct PopoverView: View {
                                 }
                             }
                         }
+                        .padding(.trailing, 10)
                     }
                     .frame(height: 280)
                     .onAppear {
@@ -369,7 +370,7 @@ struct PopoverView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .frame(width: (panelWidth - 12) * 0.43, alignment: .leading)
+            .frame(width: (panelWidth - 22) * 0.43, alignment: .leading)
             
             // Right 55%: Rating controls
             HStack(spacing: 3) {
@@ -408,7 +409,7 @@ struct PopoverView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .frame(width: (panelWidth - 12) * 0.57, alignment: .trailing)
+            .frame(width: (panelWidth - 22) * 0.57, alignment: .trailing)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
