@@ -356,8 +356,8 @@ struct PopoverView: View {
     }
     
     private func playlistRow(_ track: PlaylistTrackInfo) -> some View {
-        HStack(spacing: 4) {
-            // Left 50%: Song title (click to play, marquee on hover)
+        HStack(spacing: 0) {
+            // Left 45%: Song title (click to play, marquee on hover)
             Button(action: {
                 music.playTrackAtIndex(track.id)
                 // Refresh playlist after a short delay
@@ -369,9 +369,9 @@ struct PopoverView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .frame(maxWidth: .infinity)
+            .frame(width: (panelWidth - 12) * 0.45, alignment: .leading)
             
-            // Right 50%: Rating controls
+            // Right 55%: Rating controls
             HStack(spacing: 3) {
                 Button(action: {
                     music.setFavoritedForTrack(atIndex: track.id, value: !track.favorited)
@@ -393,6 +393,8 @@ struct PopoverView: View {
                 }
                 .buttonStyle(.plain)
                 
+                Spacer().frame(width: 6)
+                
                 ForEach(1...5, id: \.self) { star in
                     Button(action: {
                         let newRating = track.rating == star ? 0 : star
@@ -406,7 +408,7 @@ struct PopoverView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .frame(maxWidth: .infinity)
+            .frame(width: (panelWidth - 12) * 0.55, alignment: .trailing)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
