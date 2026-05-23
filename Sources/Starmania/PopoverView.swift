@@ -19,6 +19,11 @@ struct PopoverView: View {
     @State private var activeLyricsRequestID = UUID()
     @State private var pendingLyricsFileWrites: [String: String] = [:]
     
+    // Playlist view state
+    @State private var showPlaylist: Bool = false
+    @State private var playlistTracks: [PlaylistTrackInfo] = []
+    @State private var playlistLoading: Bool = false
+    
     let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     
     enum LyricsSource {
@@ -118,10 +123,19 @@ struct PopoverView: View {
                     .transition(.opacity)
             }
             
-            Divider().padding(.vertical, 3)
+            // Toggle bar: Lyrics vs Playlist
+            viewToggleBar()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
             
-            // Row 4: Lyrics
-            lyricsSection()
+            Divider()
+            
+            // Row 4: Lyrics or Playlist
+            if showPlaylist {
+                playlistSection()
+            } else {
+                lyricsSection()
+            }
             
             Divider().padding(.vertical, 3)
             
@@ -257,6 +271,147 @@ struct PopoverView: View {
                     .padding(.vertical, 8)
             }
         }
+    }
+    
+    // MARK: - View Toggle Bar
+    
+    private func viewToggleBar() -> some View {
+        HStack(spacing: 0) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showPlaylist = false } }) {
+                Image(systemName: "text.quote")
+                    .font(.system(size: 11))
+                    .foregroundStyle(showPlaylist ? .secondary : .primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(showPlaylist ? Color.clear : Color.primary.opacity(0.1))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Lyrics")
+            
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) { showPlaylist = true }
+                loadPlaylist()
+            }) {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(showPlaylist ? .primary : .secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(showPlaylist ? Color.primary.opacity(0.1) : Color.clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Playlist")
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+    }
+    
+    // MARK: - Playlist Section
+    
+    private func playlistSection() -> some View {
+        VStack(spacing: 0) {
+            if playlistLoading {
+                ProgressView("Loading playlist...")
+                    .font(.system(size: 11))
+                    .padding(.vertical, 12)
+            } else if playlistTracks.isEmpty {
+                Text("No playlist available")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 8)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(playlistTracks) { track in
+                                playlistRow(track)
+                                    .id(track.id)
+                                if track.id != playlistTracks.last?.id {
+                                    Divider().padding(.leading, 6)
+                                }
+                            }
+                        }
+                    }
+                    .frame(height: 280)
+                    .onAppear {
+                        if let current = playlistTracks.first(where: { $0.isCurrentTrack }) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                withAnimation {
+                                    proxy.scrollTo(current.id, anchor: .center)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func playlistRow(_ track: PlaylistTrackInfo) -> some View {
+        HStack(spacing: 4) {
+            // Left 50%: Song title (click to play, marquee on hover)
+            Button(action: {
+                music.playTrackAtIndex(track.id)
+                // Refresh playlist after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    loadPlaylist()
+                }
+            }) {
+                MarqueeText(text: track.name, font: .systemFont(ofSize: 11, weight: track.isCurrentTrack ? .semibold : .regular))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+            
+            // Right 50%: Rating controls
+            HStack(spacing: 3) {
+                Button(action: {
+                    music.setFavoritedForTrack(atIndex: track.id, value: !track.favorited)
+                    refreshTrackInPlaylist(track.id, favorited: !track.favorited)
+                }) {
+                    Image(systemName: track.favorited ? "heart.fill" : "heart")
+                        .font(.system(size: 10))
+                        .foregroundStyle(track.favorited ? .pink : .secondary)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    music.setDislikedForTrack(atIndex: track.id, value: !track.disliked)
+                    refreshTrackInPlaylist(track.id, disliked: !track.disliked)
+                }) {
+                    Image(systemName: track.disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                        .font(.system(size: 9))
+                        .foregroundStyle(track.disliked ? .red : .secondary)
+                }
+                .buttonStyle(.plain)
+                
+                ForEach(1...5, id: \.self) { star in
+                    Button(action: {
+                        let newRating = track.rating == star ? 0 : star
+                        music.setRatingForTrack(atIndex: track.id, stars: newRating)
+                        refreshTrackInPlaylist(track.id, rating: newRating)
+                    }) {
+                        Image(systemName: star <= track.rating ? "star.fill" : "star")
+                            .font(.system(size: 9))
+                            .foregroundStyle(star <= track.rating ? .yellow : .secondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(track.isCurrentTrack ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
     }
 
     private func lyricsHeader() -> some View {
@@ -671,6 +826,79 @@ struct PopoverView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             withAnimation { statusMessage = nil }
+        }
+    }
+    
+    // MARK: - Playlist Helpers
+    
+    private func loadPlaylist() {
+        playlistLoading = true
+        // Fetch on main actor (AppleScript is synchronous anyway)
+        DispatchQueue.main.async {
+            playlistTracks = music.fetchPlaylistTracks()
+            playlistLoading = false
+        }
+    }
+    
+    /// Optimistically update a track in the local playlist array for instant UI feedback.
+    private func refreshTrackInPlaylist(_ trackId: Int, favorited: Bool? = nil, disliked: Bool? = nil, rating: Int? = nil) {
+        guard let idx = playlistTracks.firstIndex(where: { $0.id == trackId }) else { return }
+        if let fav = favorited { playlistTracks[idx].favorited = fav }
+        if let dis = disliked { playlistTracks[idx].disliked = dis }
+        if let rat = rating { playlistTracks[idx].rating = rat }
+    }
+}
+
+// MARK: - Marquee Text (horizontal scroll on hover)
+
+struct MarqueeText: View {
+    let text: String
+    let font: NSFont
+    
+    @State private var isHovering: Bool = false
+    @State private var textWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+    
+    private var needsScroll: Bool { textWidth > containerWidth && containerWidth > 0 }
+    
+    var body: some View {
+        GeometryReader { geo in
+            let swiftFont = Font.system(size: font.pointSize, weight: font.fontDescriptor.symbolicTraits.contains(.bold) ? .semibold : .regular)
+            
+            Text(text)
+                .font(swiftFont)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .offset(x: offset)
+                .background(
+                    GeometryReader { textGeo in
+                        Color.clear.onAppear {
+                            textWidth = textGeo.size.width
+                        }
+                        .onChange(of: text) { _, _ in
+                            textWidth = textGeo.size.width
+                            offset = 0
+                        }
+                    }
+                )
+                .onAppear { containerWidth = geo.size.width }
+                .onChange(of: geo.size.width) { _, newVal in containerWidth = newVal }
+        }
+        .frame(height: font.pointSize + 4)
+        .clipped()
+        .onHover { hovering in
+            isHovering = hovering
+            if hovering && needsScroll {
+                let scrollDistance = textWidth - containerWidth
+                withAnimation(.linear(duration: Double(scrollDistance) / 30.0)) {
+                    offset = -scrollDistance
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    offset = 0
+                }
+            }
         }
     }
 }

@@ -299,6 +299,185 @@ class MusicObserver: ObservableObject {
         }
     }
     
+    // MARK: - Playlist / Album Track List
+    
+    /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
+    func fetchPlaylistTracks() -> [PlaylistTrackInfo] {
+        // First try to get the current playlist/album track list
+        // Get current track index and total count
+        let infoScript = """
+        tell application "Music"
+            try
+                set ct to current track
+                set idx to index of ct
+                set src to container of ct
+                set total to count of tracks of src
+                return (idx as string) & "|||" & (total as string)
+            on error
+                return "ERROR"
+            end try
+        end tell
+        """
+        
+        guard let info = runAppleScript(infoScript), info != "ERROR" else {
+            return []
+        }
+        
+        let parts = info.components(separatedBy: "|||")
+        guard parts.count >= 2,
+              let currentIndex = Int(parts[0]),
+              let totalTracks = Int(parts[1]) else {
+            return []
+        }
+        
+        // Calculate window: up to 40 tracks centered on current track
+        let windowSize = 40
+        var startIndex: Int
+        var endIndex: Int
+        
+        if totalTracks <= windowSize {
+            startIndex = 1
+            endIndex = totalTracks
+        } else {
+            let halfWindow = windowSize / 2
+            startIndex = max(1, currentIndex - halfWindow)
+            endIndex = startIndex + windowSize - 1
+            if endIndex > totalTracks {
+                endIndex = totalTracks
+                startIndex = max(1, endIndex - windowSize + 1)
+            }
+        }
+        
+        // Fetch track data for the window
+        let fetchScript = """
+        tell application "Music"
+            try
+                set ct to current track
+                set src to container of ct
+                set trackList to tracks \(startIndex) thru \(endIndex) of src
+                set currentIdx to index of ct
+                set output to ""
+                repeat with t in trackList
+                    set trackName to name of t
+                    set trackArtist to artist of t
+                    set isFav to favorited of t
+                    set isDis to disliked of t
+                    set trackRating to rating of t
+                    set trackIdx to index of t
+                    set isCurrent to (trackIdx = currentIdx) as string
+                    set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
+                    if output is "" then
+                        set output to line
+                    else
+                        set output to output & "^^^" & line
+                    end if
+                end repeat
+                return output
+            on error errMsg
+                return "ERROR:" & errMsg
+            end try
+        end tell
+        """
+        
+        guard let result = runAppleScript(fetchScript), !result.hasPrefix("ERROR:") else {
+            return []
+        }
+        
+        let lines = result.components(separatedBy: "^^^")
+        var tracks: [PlaylistTrackInfo] = []
+        
+        for line in lines {
+            let fields = line.components(separatedBy: "|||")
+            guard fields.count >= 7 else { continue }
+            
+            let name = fields[0]
+            let artist = fields[1]
+            let favorited = fields[2].lowercased() == "true"
+            let disliked = fields[3].lowercased() == "true"
+            let rawRating = Int(fields[4]) ?? 0
+            let rating = rawRating / 20
+            let trackIndex = Int(fields[5]) ?? 0
+            let isCurrent = fields[6].lowercased() == "true"
+            
+            tracks.append(PlaylistTrackInfo(
+                id: trackIndex,
+                name: name,
+                artist: artist,
+                favorited: favorited,
+                disliked: disliked,
+                rating: rating,
+                isCurrentTrack: isCurrent
+            ))
+        }
+        
+        return tracks
+    }
+    
+    /// Play a specific track by its index in the current playlist/album container.
+    func playTrackAtIndex(_ index: Int) {
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                set ct to current track
+                set src to container of ct
+                play track \(index) of src
+            end try
+        end tell
+        """)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.poll()
+        }
+    }
+    
+    /// Set favorited for a specific track by index in the current playlist container.
+    func setFavoritedForTrack(atIndex index: Int, value: Bool) {
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                set ct to current track
+                set src to container of ct
+                set favorited of track \(index) of src to \(value)
+            end try
+        end tell
+        """)
+        if currentTrack != nil {
+            poll()
+        }
+    }
+    
+    /// Set disliked for a specific track by index in the current playlist container.
+    func setDislikedForTrack(atIndex index: Int, value: Bool) {
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                set ct to current track
+                set src to container of ct
+                set disliked of track \(index) of src to \(value)
+            end try
+        end tell
+        """)
+        if currentTrack != nil {
+            poll()
+        }
+    }
+    
+    /// Set rating for a specific track by index in the current playlist container.
+    func setRatingForTrack(atIndex index: Int, stars: Int) {
+        let ratingValue = stars * 20
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                set ct to current track
+                set src to container of ct
+                set rating of track \(index) of src to \(ratingValue)
+            end try
+        end tell
+        """)
+        if currentTrack != nil {
+            poll()
+        }
+    }
+    
     // MARK: - AppleScript Runner
     
     @discardableResult

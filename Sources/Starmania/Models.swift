@@ -37,6 +37,18 @@ struct LyricsResult {
     let artistName: String
 }
 
+// MARK: - Playlist Track Info
+
+struct PlaylistTrackInfo: Identifiable {
+    let id: Int              // track index in playlist (1-based)
+    let name: String
+    let artist: String
+    var favorited: Bool
+    var disliked: Bool
+    var rating: Int          // 0-5
+    let isCurrentTrack: Bool
+}
+
 // MARK: - App Settings
 
 struct AppSettings: Codable {
