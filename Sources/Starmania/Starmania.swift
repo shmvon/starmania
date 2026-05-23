@@ -289,7 +289,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         
         // About
-        let aboutItem = NSMenuItem(title: "About Starmania", action: #selector(showAbout), keyEquivalent: "")
+        let aboutItem = NSMenuItem(title: "About", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
         
@@ -335,7 +335,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "Starmania"
-        alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 Sem Vandekerckhove.\n\nLyrics database: genius.com."
+        alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon.\n\nGitHub: github.com/shmvon.\n\nTip Jar: https://buymeacoffee.com/shmvon.\n\nLyrics database: genius.com."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
