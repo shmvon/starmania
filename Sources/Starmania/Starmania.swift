@@ -108,18 +108,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let starChar: NSString = track.favorited ? "★" : "☆"
         let starBounds = starChar.size(withAttributes: [.font: starFont])
         
-        let hasNumber = track.rating > 0
-        let hasDislike = track.disliked
-        
-        // Calculate annotation column width (number and × share the same x)
-        var annotWidth: CGFloat = 0
-        if hasNumber {
-            let numStr = NSString(string: "\(track.rating)")
-            annotWidth = max(annotWidth, numStr.size(withAttributes: [.font: numFont]).width)
+        var topStr: String? = nil
+        if track.rating > 0 && !track.disliked {
+            topStr = "\(track.rating)"
         }
-        if hasDislike {
-            let xStr: NSString = "●"
-            annotWidth = max(annotWidth, xStr.size(withAttributes: [.font: xFont]).width)
+        
+        var bottomStr: String? = nil
+        if track.disliked {
+            bottomStr = track.rating > 0 ? "\(track.rating)" : "0"
+        }
+        
+        // Calculate annotation column width (top and bottom strings share the same x)
+        var annotWidth: CGFloat = 0
+        if let topStr = topStr {
+            let topNS = topStr as NSString
+            annotWidth = max(annotWidth, topNS.size(withAttributes: [.font: numFont]).width)
+        }
+        if let bottomStr = bottomStr {
+            let bottomNS = bottomStr as NSString
+            annotWidth = max(annotWidth, bottomNS.size(withAttributes: [.font: xFont]).width)
         }
         
         let totalWidth = starBounds.width + (annotWidth > 0 ? annotWidth + 1 : 0)
@@ -132,18 +139,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let annotX = starBounds.width + 1  // Right edge of star + 1pt gap
             
             // Draw rating number at top-right (aligned with star top)
-            if hasNumber {
-                let numStr = NSString(string: "\(track.rating)")
-                let numBounds = numStr.size(withAttributes: [.font: numFont])
+            if let topStr = topStr {
+                let topNS = topStr as NSString
+                let numBounds = topNS.size(withAttributes: [.font: numFont])
                 let numY = menuBarHeight - numBounds.height - 2  // 2pt from top
-                numStr.draw(at: NSPoint(x: annotX, y: numY), withAttributes: [.font: numFont])
+                topNS.draw(at: NSPoint(x: annotX, y: numY), withAttributes: [.font: numFont])
             }
             
-            // Draw ● at bottom-right (same x as number, aligned with star bottom)
-            if hasDislike {
-                let xStr: NSString = "●"
+            // Draw dislike/rating at bottom-right (same x as number, aligned with star bottom)
+            if let bottomStr = bottomStr {
+                let bottomNS = bottomStr as NSString
                 let xY: CGFloat = 1  // 1pt from bottom, aligned with star bottom edge
-                xStr.draw(at: NSPoint(x: annotX, y: xY), withAttributes: [.font: xFont])
+                bottomNS.draw(at: NSPoint(x: annotX, y: xY), withAttributes: [.font: xFont])
             }
             
             return true

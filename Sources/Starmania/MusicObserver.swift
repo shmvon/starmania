@@ -436,11 +436,11 @@ class MusicObserver: ObservableObject {
                         set trackRating to rating of t
                         set trackIdx to index of t
                         set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                        set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
+                        set trackLine to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
                         if output is "" then
-                            set output to line
+                            set output to trackLine
                         else
-                            set output to output & "^^^" & line
+                            set output to output & "^^^" & trackLine
                         end if
                     end repeat
                     return output
@@ -468,11 +468,11 @@ class MusicObserver: ObservableObject {
                         set trackRating to rating of t
                         set trackIdx to index of t
                         set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                        set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
+                        set trackLine to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
                         if output is "" then
-                            set output to line
+                            set output to trackLine
                         else
-                            set output to output & "^^^" & line
+                            set output to output & "^^^" & trackLine
                         end if
                     end repeat
                     return output
