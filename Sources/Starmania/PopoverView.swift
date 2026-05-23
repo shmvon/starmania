@@ -135,14 +135,14 @@ struct PopoverView: View {
                 playlistSection()
             } else {
                 lyricsSection()
+                
+                Divider().padding(.vertical, 3)
+                
+                // Row 5: Action buttons (only in lyrics mode)
+                actionButtons(track)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
             }
-            
-            Divider().padding(.vertical, 3)
-            
-            // Row 5: Action buttons
-            actionButtons(track)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 10)
         }
     }
     
@@ -277,8 +277,8 @@ struct PopoverView: View {
     
     private func viewToggleBar() -> some View {
         HStack(spacing: 0) {
-            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showPlaylist = false } }) {
-                Image(systemName: "text.quote")
+            Button(action: { showPlaylist = false }) {
+                Image(systemName: "mic")
                     .font(.system(size: 11))
                     .foregroundStyle(showPlaylist ? .secondary : .primary)
                     .frame(maxWidth: .infinity)
@@ -292,7 +292,7 @@ struct PopoverView: View {
             .help("Lyrics")
             
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.15)) { showPlaylist = true }
+                showPlaylist = true
                 loadPlaylist()
             }) {
                 Image(systemName: "list.bullet")
@@ -833,11 +833,9 @@ struct PopoverView: View {
     
     private func loadPlaylist() {
         playlistLoading = true
-        // Fetch on main actor (AppleScript is synchronous anyway)
-        DispatchQueue.main.async {
-            playlistTracks = music.fetchPlaylistTracks()
-            playlistLoading = false
-        }
+        playlistTracks = []
+        playlistTracks = music.fetchPlaylistTracks()
+        playlistLoading = false
     }
     
     /// Optimistically update a track in the local playlist array for instant UI feedback.

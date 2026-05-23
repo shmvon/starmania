@@ -303,32 +303,62 @@ class MusicObserver: ObservableObject {
     
     /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
     func fetchPlaylistTracks() -> [PlaylistTrackInfo] {
-        // First try to get the current playlist/album track list
-        // Get current track index and total count
+        // Step 1: Get track count and current track index
+        // Try "current playlist" first (works for playlists), fallback to "container of current track" (works for albums)
         let infoScript = """
         tell application "Music"
             try
                 set ct to current track
-                set idx to index of ct
-                set src to container of ct
-                set total to count of tracks of src
-                return (idx as string) & "|||" & (total as string)
-            on error
+                set ctName to name of ct
+                set ctArtist to artist of ct
+                
+                -- Try current playlist first
+                try
+                    set src to current playlist
+                    set total to count of tracks of src
+                    -- Find current track index by matching name + artist
+                    set idx to 0
+                    repeat with i from 1 to total
+                        set t to track i of src
+                        if name of t is ctName and artist of t is ctArtist then
+                            set idx to i
+                            exit repeat
+                        end if
+                    end repeat
+                    if idx > 0 then
+                        return (idx as string) & "|||" & (total as string) & "|||playlist"
+                    end if
+                end try
+                
+                -- Fallback: container of current track
+                try
+                    set src to container of ct
+                    set total to count of tracks of src
+                    set idx to index of ct
+                    return (idx as string) & "|||" & (total as string) & "|||container"
+                end try
+                
+                return "ERROR"
+            on error errMsg
                 return "ERROR"
             end try
         end tell
         """
         
         guard let info = runAppleScript(infoScript), info != "ERROR" else {
+            print("[Starmania] Playlist info script returned ERROR or nil")
             return []
         }
         
         let parts = info.components(separatedBy: "|||")
-        guard parts.count >= 2,
+        guard parts.count >= 3,
               let currentIndex = Int(parts[0]),
               let totalTracks = Int(parts[1]) else {
+            print("[Starmania] Could not parse playlist info: \(info)")
             return []
         }
+        
+        let sourceType = parts[2]  // "playlist" or "container"
         
         // Calculate window: up to 40 tracks centered on current track
         let windowSize = 40
@@ -348,14 +378,18 @@ class MusicObserver: ObservableObject {
             }
         }
         
-        // Fetch track data for the window
+        // Step 2: Fetch track data for the window
+        // Build the source reference depending on which method worked
+        let sourceRef = sourceType == "playlist" ? "current playlist" : "container of current track"
+        
         let fetchScript = """
         tell application "Music"
             try
                 set ct to current track
-                set src to container of ct
+                set ctName to name of ct
+                set ctArtist to artist of ct
+                set src to \(sourceRef)
                 set trackList to tracks \(startIndex) thru \(endIndex) of src
-                set currentIdx to index of ct
                 set output to ""
                 repeat with t in trackList
                     set trackName to name of t
@@ -364,7 +398,7 @@ class MusicObserver: ObservableObject {
                     set isDis to disliked of t
                     set trackRating to rating of t
                     set trackIdx to index of t
-                    set isCurrent to (trackIdx = currentIdx) as string
+                    set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
                     set line to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
                     if output is "" then
                         set output to line
@@ -380,6 +414,7 @@ class MusicObserver: ObservableObject {
         """
         
         guard let result = runAppleScript(fetchScript), !result.hasPrefix("ERROR:") else {
+            print("[Starmania] Playlist fetch script failed")
             return []
         }
         
@@ -410,6 +445,7 @@ class MusicObserver: ObservableObject {
             ))
         }
         
+        print("[Starmania] Loaded \(tracks.count) playlist tracks via \(sourceType)")
         return tracks
     }
     
@@ -418,9 +454,12 @@ class MusicObserver: ObservableObject {
         let _ = runAppleScript("""
         tell application "Music"
             try
-                set ct to current track
-                set src to container of ct
-                play track \(index) of src
+                play track \(index) of current playlist
+            on error
+                try
+                    set src to container of current track
+                    play track \(index) of src
+                end try
             end try
         end tell
         """)
@@ -434,9 +473,12 @@ class MusicObserver: ObservableObject {
         let _ = runAppleScript("""
         tell application "Music"
             try
-                set ct to current track
-                set src to container of ct
-                set favorited of track \(index) of src to \(value)
+                set favorited of track \(index) of current playlist to \(value)
+            on error
+                try
+                    set src to container of current track
+                    set favorited of track \(index) of src to \(value)
+                end try
             end try
         end tell
         """)
@@ -450,9 +492,12 @@ class MusicObserver: ObservableObject {
         let _ = runAppleScript("""
         tell application "Music"
             try
-                set ct to current track
-                set src to container of ct
-                set disliked of track \(index) of src to \(value)
+                set disliked of track \(index) of current playlist to \(value)
+            on error
+                try
+                    set src to container of current track
+                    set disliked of track \(index) of src to \(value)
+                end try
             end try
         end tell
         """)
@@ -467,9 +512,12 @@ class MusicObserver: ObservableObject {
         let _ = runAppleScript("""
         tell application "Music"
             try
-                set ct to current track
-                set src to container of ct
-                set rating of track \(index) of src to \(ratingValue)
+                set rating of track \(index) of current playlist to \(ratingValue)
+            on error
+                try
+                    set src to container of current track
+                    set rating of track \(index) of src to \(ratingValue)
+                end try
             end try
         end tell
         """)
