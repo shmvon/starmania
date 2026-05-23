@@ -335,10 +335,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "Starmania"
-        alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon.\n\nGitHub: github.com/shmvon.\n\nTip Jar: https://buymeacoffee.com/shmvon.\n\nLyrics database: genius.com."
+        alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon.\n\nLyrics database: genius.com."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
-        alert.runModal()
+        alert.addButton(withTitle: "GitHub")
+        alert.addButton(withTitle: "Buy Me a Coffee")
+        
+        let response = alert.runModal()
+        if response == .alertSecondButtonReturn {
+            if let url = URL(string: "https://github.com/shmvon") {
+                NSWorkspace.shared.open(url)
+            }
+            // Optional: reopen the about box if they click a link
+            // showAbout() 
+        } else if response == .alertThirdButtonReturn {
+            if let url = URL(string: "https://buymeacoffee.com/shmvon") {
+                NSWorkspace.shared.open(url)
+            }
+            // Optional: reopen the about box if they click a link
+            // showAbout()
+        }
     }
     
     @objc private func quitApp() {
