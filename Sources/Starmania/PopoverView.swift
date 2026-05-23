@@ -369,7 +369,7 @@ struct PopoverView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .frame(width: (panelWidth - 12) * 0.45, alignment: .leading)
+            .frame(width: (panelWidth - 12) * 0.43, alignment: .leading)
             
             // Right 55%: Rating controls
             HStack(spacing: 3) {
@@ -393,7 +393,7 @@ struct PopoverView: View {
                 }
                 .buttonStyle(.plain)
                 
-                Spacer().frame(width: 6)
+                Spacer().frame(width: 4)
                 
                 ForEach(1...5, id: \.self) { star in
                     Button(action: {
@@ -408,7 +408,7 @@ struct PopoverView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .frame(width: (panelWidth - 12) * 0.55, alignment: .trailing)
+            .frame(width: (panelWidth - 12) * 0.57, alignment: .trailing)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
