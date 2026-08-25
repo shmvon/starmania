@@ -271,7 +271,34 @@ class MusicObserver: ObservableObject {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Music") {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
         }
-        let _ = runAppleScript("tell application \"Music\" to play")
+        let _ = runAppleScript("""
+        tell application "Music"
+            try
+                set stateBeforePlay to player state
+                if stateBeforePlay is paused then
+                    playpause
+                else if stateBeforePlay is stopped then
+                    set playedSelectedTrack to false
+                    try
+                        set selectedTracks to selection
+                        if (count of selectedTracks) > 0 then
+                            play (item 1 of selectedTracks)
+                            set playedSelectedTrack to true
+                        end if
+                    end try
+                    if playedSelectedTrack is false then
+                        playpause
+                    end if
+                else
+                    play
+                end if
+            on error
+                try
+                    playpause
+                end try
+            end try
+        end tell
+        """)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.poll()
         }
