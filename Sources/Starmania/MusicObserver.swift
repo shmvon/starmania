@@ -19,12 +19,14 @@ class MusicObserver: ObservableObject {
     func startPolling() {
         // Immediate first poll
         poll()
-        // Then every 2 seconds
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // Then every 2 seconds on common run loop mode
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.poll()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
     }
     
     func stopPolling() {
@@ -200,6 +202,10 @@ class MusicObserver: ObservableObject {
     // MARK: - Write Back to Apple Music
     
     func setFavorited(_ value: Bool) {
+        currentTrack?.favorited = value
+        if value {
+            currentTrack?.disliked = false
+        }
         let _ = runAppleScript("""
         tell application "Music"
             try
@@ -211,6 +217,10 @@ class MusicObserver: ObservableObject {
     }
     
     func setDisliked(_ value: Bool) {
+        currentTrack?.disliked = value
+        if value {
+            currentTrack?.favorited = false
+        }
         let _ = runAppleScript("""
         tell application "Music"
             try
@@ -222,6 +232,7 @@ class MusicObserver: ObservableObject {
     }
     
     func setRating(_ stars: Int) {
+        currentTrack?.rating = stars
         // Apple Music rating is 0-100, where each star = 20
         let ratingValue = stars * 20
         let _ = runAppleScript("""
@@ -330,6 +341,10 @@ class MusicObserver: ObservableObject {
     
     /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
     func fetchPlaylistTracks() -> [PlaylistTrackInfo] {
+        return Self.fetchPlaylistTracksInternal()
+    }
+
+    private static func fetchPlaylistTracksInternal() -> [PlaylistTrackInfo] {
         // Step 1: Get track count and current track index
         // Try to identify if we are playing an album or playlist, using fast checks
         let infoScript = """
@@ -341,23 +356,47 @@ class MusicObserver: ObservableObject {
                 
                 -- Check if playing an album from the main library playlist
                 try
-                    set plName to name of current playlist
-                    if plName is "Music" or plName is "Library" then
+                    set isLib to false
+                    try
+                        if special kind of current playlist is Music then
+                            set isLib to true
+                        end if
+                    end try
+                    try
+                        set plName to name of current playlist
+                        if plName is "Music" or plName is "Library" or plName is "Muziek" or plName is "Musique" or plName is "Musik" or plName is "Música" then
+                            set isLib to true
+                        end if
+                    end try
+                    
+                    if isLib then
                         set ctAlbum to album of ct
-                        set ctArtist to artist of ct
+                        set ctAlbumArtist to ""
+                        try
+                            set ctAlbumArtist to album artist of ct
+                        end try
+                        if ctAlbumArtist is "" then
+                            set ctAlbumArtist to ctArtist
+                        end if
                         if ctAlbum is not "" then
-                            set trackList to (every track of current playlist whose album is ctAlbum and artist is ctArtist)
+                            if ctAlbumArtist is not "" then
+                                set trackList to (every track of current playlist whose album is ctAlbum and (album artist is ctAlbumArtist or artist is ctAlbumArtist))
+                            else
+                                set trackList to (every track of current playlist whose album is ctAlbum)
+                            end if
                             set total to count of trackList
-                            set idx to 0
-                            repeat with i from 1 to total
-                                set t to item i of trackList
-                                if name of t is ctName then
-                                    set idx to i
-                                    exit repeat
+                            if total > 0 then
+                                set idx to 0
+                                repeat with i from 1 to total
+                                    set t to item i of trackList
+                                    if name of t is ctName then
+                                        set idx to i
+                                        exit repeat
+                                    end if
+                                end repeat
+                                if idx > 0 then
+                                    return (idx as string) & "|||" & (total as string) & "|||album"
                                 end if
-                            end repeat
-                            if idx > 0 then
-                                return (idx as string) & "|||" & (total as string) & "|||album"
                             end if
                         end if
                     end if
@@ -409,7 +448,7 @@ class MusicObserver: ObservableObject {
         end tell
         """
         
-        guard let info = runAppleScript(infoScript), info != "ERROR" else {
+        guard let info = runAppleScriptDirect(infoScript), info != "ERROR" else {
             print("[Starmania] Playlist info script returned ERROR or nil")
             return []
         }
@@ -452,7 +491,18 @@ class MusicObserver: ObservableObject {
                     set ctName to name of ct
                     set ctArtist to artist of ct
                     set ctAlbum to album of ct
-                    set trackList to (every track of current playlist whose album is ctAlbum and artist is ctArtist)
+                    set ctAlbumArtist to ""
+                    try
+                        set ctAlbumArtist to album artist of ct
+                    end try
+                    if ctAlbumArtist is "" then
+                        set ctAlbumArtist to ctArtist
+                    end if
+                    if ctAlbumArtist is not "" then
+                        set trackList to (every track of current playlist whose album is ctAlbum and (album artist is ctAlbumArtist or artist is ctAlbumArtist))
+                    else
+                        set trackList to (every track of current playlist whose album is ctAlbum)
+                    end if
                     set trackListWindow to items \(startIndex) thru \(endIndex) of trackList
                     set output to ""
                     repeat with t in trackListWindow
@@ -487,21 +537,46 @@ class MusicObserver: ObservableObject {
                     set src to \(sourceRef)
                     set trackListWindow to tracks \(startIndex) thru \(endIndex) of src
                     set output to ""
-                    repeat with t in trackListWindow
-                        set trackName to name of t
-                        set trackArtist to artist of t
-                        set isFav to favorited of t
-                        set isDis to disliked of t
-                        set trackRating to rating of t
-                        set trackIdx to index of t
-                        set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                        set trackLine to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
-                        if output is "" then
-                            set output to trackLine
-                        else
-                            set output to output & "^^^" & trackLine
-                        end if
-                    end repeat
+                    try
+                        set nameList to name of trackListWindow
+                        set artistList to artist of trackListWindow
+                        set favList to favorited of trackListWindow
+                        set disList to disliked of trackListWindow
+                        set ratingList to rating of trackListWindow
+                        set idxList to index of trackListWindow
+                        set winCount to count of nameList
+                        repeat with i from 1 to winCount
+                            set trackName to item i of nameList
+                            set trackArtist to item i of artistList
+                            set isFav to (item i of favList) as string
+                            set isDis to (item i of disList) as string
+                            set trackRating to (item i of ratingList) as string
+                            set trackIdx to (item i of idxList) as string
+                            set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
+                            set trackLine to trackName & "|||" & trackArtist & "|||" & isFav & "|||" & isDis & "|||" & trackRating & "|||" & trackIdx & "|||" & isCurrent
+                            if output is "" then
+                                set output to trackLine
+                            else
+                                set output to output & "^^^" & trackLine
+                            end if
+                        end repeat
+                    on error
+                        repeat with t in trackListWindow
+                            set trackName to name of t
+                            set trackArtist to artist of t
+                            set isFav to favorited of t
+                            set isDis to disliked of t
+                            set trackRating to rating of t
+                            set trackIdx to index of t
+                            set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
+                            set trackLine to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
+                            if output is "" then
+                                set output to trackLine
+                            else
+                                set output to output & "^^^" & trackLine
+                            end if
+                        end repeat
+                    end try
                     return output
                 on error errMsg
                     return "ERROR:" & errMsg
@@ -510,7 +585,7 @@ class MusicObserver: ObservableObject {
             """
         }
         
-        guard let result = runAppleScript(fetchScript), !result.hasPrefix("ERROR:") else {
+        guard let result = runAppleScriptDirect(fetchScript), !result.hasPrefix("ERROR:") else {
             print("[Starmania] Playlist fetch script failed")
             return []
         }
@@ -627,6 +702,11 @@ class MusicObserver: ObservableObject {
     
     @discardableResult
     private func runAppleScript(_ source: String) -> String? {
+        return Self.runAppleScriptDirect(source)
+    }
+
+    @discardableResult
+    static func runAppleScriptDirect(_ source: String) -> String? {
         var error: NSDictionary?
         let script = NSAppleScript(source: source)
         let result = script?.executeAndReturnError(&error)

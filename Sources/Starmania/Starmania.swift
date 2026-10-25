@@ -35,6 +35,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Start music observer
         MusicObserver.shared.startPolling()
         
+        // Suppress any phantom window created by SwiftUI scene
+        suppressExtraneousWindows()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidBecomeKey(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
+        
         // Observe track changes to update menu bar icon
         MusicObserver.shared.$currentTrack
             .receive(on: RunLoop.main)
@@ -42,7 +51,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateStatusIcon()
             }
             .store(in: &cancellables)
-        
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        suppressExtraneousWindows()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return false
+    }
+
+    private func suppressExtraneousWindows() {
+        for window in NSApplication.shared.windows {
+            if window !== panelWindow {
+                window.close()
+                window.orderOut(nil)
+            }
+        }
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        if window !== panelWindow {
+            window.close()
+            window.orderOut(nil)
+        }
     }
     
     // MARK: - Status Item
@@ -95,30 +128,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let track = track else {
             // No track: draw an empty star
             let starChar: NSString = "☆"
-            let starBounds = starChar.size(withAttributes: [.font: starFont])
-            let image = NSImage(size: NSSize(width: ceil(starBounds.width), height: menuBarHeight), flipped: false) { _ in
-                let y = (menuBarHeight - starBounds.height) / 2 - 0.5
-                starChar.draw(at: NSPoint(x: 0, y: y), withAttributes: [.font: starFont])
-                return true
-            }
-            image.isTemplate = true
-            return image
+            let starRect = NSRect(x: 2, y: 1, width: starSize, height: menuBarHeight)
+            let totalWidth: CGFloat = starSize + 4
+            let icon = NSImage(size: NSSize(width: totalWidth, height: menuBarHeight))
+            icon.lockFocus()
+            starChar.draw(in: starRect, withAttributes: [
+                .font: starFont,
+                .foregroundColor: NSColor.labelColor
+            ])
+            icon.unlockFocus()
+            icon.isTemplate = false
+            return icon
         }
         
-        let starChar: NSString = track.favorited ? "★" : "☆"
+        let isFav = track.favorited
+        let isDis = track.disliked
+        let rating = track.rating
+        
+        // Star glyph: solid if favorited, else hollow
+        let starChar: NSString = isFav ? "★" : "☆"
+        
+        // Annotations:
+        // Top-right: rating number (1-5), or empty
+        let topStr: String? = rating > 0 ? "\(rating)" : nil
+        // Bottom-right: dislike ×, or rating number if disliked+rated
+        let bottomStr: String? = isDis ? "×" : nil
+        
+        // Measure elements to determine total image width
         let starBounds = starChar.size(withAttributes: [.font: starFont])
-        
-        var topStr: String? = nil
-        if track.rating > 0 && !track.disliked {
-            topStr = "\(track.rating)"
-        }
-        
-        var bottomStr: String? = nil
-        if track.disliked {
-            bottomStr = track.rating > 0 ? "\(track.rating)" : "0"
-        }
-        
-        // Calculate annotation column width (top and bottom strings share the same x)
         var annotWidth: CGFloat = 0
         if let topStr = topStr {
             let topNS = topStr as NSString
@@ -215,50 +252,74 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let panelHeight = panel.frame.height
         
         let x = screenFrame.midX - panelWidth / 2
-        let y = screenFrame.minY - panelHeight - 4  // 4pt gap below menu bar
+        // Menu bar height is typically 24-25pt; position panel 2pt below the screen frame
+        let y = screenFrame.minY - panelHeight - 2
         
         panel.setFrameOrigin(NSPoint(x: x, y: y))
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        panel.orderFrontRegardless()
         
-        // Monitor for clicks outside the panel
-        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            self?.hidePanel()
-        }
+        // Monitor clicks outside to dismiss
+        startClickMonitoring()
     }
     
     private func hidePanel() {
         panelWindow?.orderOut(nil)
+        stopClickMonitoring()
+    }
+    
+    private func startClickMonitoring() {
+        stopClickMonitoring()
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, let panel = self.panelWindow, panel.isVisible else { return }
+                
+                // Check if click was inside status item button
+                if let button = self.statusItem?.button,
+                   let buttonWindow = button.window {
+                    let clickLoc = NSEvent.mouseLocation
+                    let buttonScreenFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+                    if buttonScreenFrame.contains(clickLoc) {
+                        return  // Status button clicked, will toggle via its own action
+                    }
+                }
+                
+                // Dismiss panel
+                self.hidePanel()
+            }
+        }
+    }
+    
+    private func stopClickMonitoring() {
         if let monitor = clickMonitor {
             NSEvent.removeMonitor(monitor)
             clickMonitor = nil
         }
     }
     
-    // MARK: - Settings Menu (Alt-Click / Right-Click)
+    // MARK: - Settings Menu (Option-click or right-click)
     
-    @objc func showSettingsMenu() {
+    private func showSettingsMenu() {
         let menu = NSMenu()
         
-        // Auto-fetch Lyrics toggle
-        let autoLyricsItem = NSMenuItem(
+        // Auto-fetch Lyrics
+        let autoFetchLyricsItem = NSMenuItem(
             title: "Auto-fetch Lyrics",
             action: #selector(toggleAutoFetchLyrics),
             keyEquivalent: ""
         )
-        autoLyricsItem.target = self
-        autoLyricsItem.state = SettingsManager.shared.settings.autoFetchLyrics ? .on : .off
-        menu.addItem(autoLyricsItem)
+        autoFetchLyricsItem.target = self
+        autoFetchLyricsItem.state = SettingsManager.shared.settings.autoFetchLyrics ? .on : .off
+        menu.addItem(autoFetchLyricsItem)
         
-        // Auto-fetch Artwork toggle
-        let autoArtworkItem = NSMenuItem(
+        // Auto-fetch Artwork
+        let autoFetchArtworkItem = NSMenuItem(
             title: "Auto-fetch Artwork",
             action: #selector(toggleAutoFetchArtwork),
             keyEquivalent: ""
         )
-        autoArtworkItem.target = self
-        autoArtworkItem.state = SettingsManager.shared.settings.autoFetchArtwork ? .on : .off
-        menu.addItem(autoArtworkItem)
+        autoFetchArtworkItem.target = self
+        autoFetchArtworkItem.state = SettingsManager.shared.settings.autoFetchArtwork ? .on : .off
+        menu.addItem(autoFetchArtworkItem)
         
         menu.addItem(.separator())
         
@@ -283,6 +344,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(autoWriteArtworkItem)
         
         menu.addItem(.separator())
+        
+        // Lyrics Provider Selection
+        let providerMenu = NSMenu()
+        let currentProvider = SettingsManager.shared.settings.lyricsProvider
+        for option in LyricsProviderOption.allCases {
+            let item = NSMenuItem(
+                title: option.title,
+                action: #selector(selectLyricsProvider(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = option
+            item.state = (currentProvider == option) ? .on : .off
+            providerMenu.addItem(item)
+        }
+        let providerMenuItem = NSMenuItem(title: "Lyrics Provider", action: nil, keyEquivalent: "")
+        providerMenuItem.submenu = providerMenu
+        menu.addItem(providerMenuItem)
         
         // Genius API Key
         let apiKeyItem = NSMenuItem(
@@ -335,6 +414,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsManager.shared.save()
     }
     
+    @objc private func selectLyricsProvider(_ sender: NSMenuItem) {
+        guard let option = sender.representedObject as? LyricsProviderOption else { return }
+        SettingsManager.shared.settings.lyricsProvider = option
+        SettingsManager.shared.save()
+    }
+    
     @objc private func promptGeniusKey() {
         showGeniusKeySetup()
     }
@@ -344,7 +429,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         while shouldShow {
             let alert = NSAlert()
             alert.messageText = "Starmania (1.0)"
-            alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon\n\nLyrics database: genius.com."
+            alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon\n\nLyrics databases: SongLyrics, LRCLIB / Lyrica, Genius."
             alert.alertStyle = .informational
             alert.addButton(withTitle: "OK")
             alert.addButton(withTitle: "GitHub")

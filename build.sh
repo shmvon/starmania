@@ -129,13 +129,18 @@ else
     FINAL_APP_BUNDLE="$WORKSPACE_DIR/${APP_NAME}.app"
 fi
 
-# Clean previous build artifacts and old workspace leftovers
-echo "Flushing build cache and old assets..."
+# Clean previous app bundle output
+echo "Cleaning previous app bundle..."
 rm -rf "$WORKSPACE_DIR/${APP_NAME}.app"
 rm -rf "$WORKSPACE_DIR/${BASE_APP_NAME}.app"
 rm -rf "$FINAL_APP_BUNDLE"
-rm -rf "$WORKSPACE_DIR/.build"
-rm -rf "$BUILD_PATH"
+
+# Flush build cache only if --clean flag is explicitly passed
+if [ "$1" = "--clean" ] || [ "$2" = "--clean" ]; then
+    echo "Flushing build cache (--clean specified)..."
+    rm -rf "$WORKSPACE_DIR/.build"
+    rm -rf "$BUILD_PATH"
+fi
 
 # Create a clean temporary staging bundle directory
 STAGING_DIR=$(mktemp -d /private/tmp/${BASE_APP_NAME}_staging.XXXXXX)
@@ -151,12 +156,16 @@ mkdir -p "$RESOURCES_DIR"
 export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 
 # Get macOS SDK path
-PREFERRED_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
+PREFERRED_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+if [ ! -d "$PREFERRED_SDK" ]; then
+    PREFERRED_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
+fi
 if [ -d "$PREFERRED_SDK" ]; then
     SDK_PATH="$PREFERRED_SDK"
 else
     SDK_PATH=$(xcrun --show-sdk-path)
 fi
+export SDKROOT="$SDK_PATH"
 echo "Using SDK: $SDK_PATH"
 echo "Using deployment target: macOS $DEPLOYMENT_TARGET ($SWIFT_TARGET)"
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - Main Popover View
 
@@ -29,6 +30,9 @@ struct PopoverView: View {
     enum LyricsSource {
         case none
         case embedded
+        case songLyrics
+        case lrclib
+        case lyrica
         case genius
     }
     
@@ -58,6 +62,15 @@ struct PopoverView: View {
             if oldKey != newKey {
                 onTrackChanged()
             }
+        }
+        .onChange(of: music.currentTrack?.rating) { _, _ in
+            syncCurrentTrackInPlaylist()
+        }
+        .onChange(of: music.currentTrack?.favorited) { _, _ in
+            syncCurrentTrackInPlaylist()
+        }
+        .onChange(of: music.currentTrack?.disliked) { _, _ in
+            syncCurrentTrackInPlaylist()
         }
         .onAppear {
             // Handle initial load (onChange doesn't fire for the first value)
@@ -357,8 +370,13 @@ struct PopoverView: View {
     }
     
     private func playlistRow(_ track: PlaylistTrackInfo) -> some View {
-        HStack(spacing: 0) {
-            // Left 45%: Song title (click to play, marquee on hover)
+        let isCurrent = track.isCurrentTrack
+        let isFav = isCurrent ? (music.currentTrack?.favorited ?? track.favorited) : track.favorited
+        let isDis = isCurrent ? (music.currentTrack?.disliked ?? track.disliked) : track.disliked
+        let currentRating = isCurrent ? (music.currentTrack?.rating ?? track.rating) : track.rating
+
+        return HStack(spacing: 0) {
+            // Left ~44%: Song title (click to play, marquee on hover)
             Button(action: {
                 music.playTrackAtIndex(track.id)
                 // Refresh playlist after a short delay
@@ -366,56 +384,76 @@ struct PopoverView: View {
                     loadPlaylist()
                 }
             }) {
-                MarqueeText(text: track.name, font: .systemFont(ofSize: 11, weight: track.isCurrentTrack ? .semibold : .regular))
+                MarqueeText(text: track.name, font: .systemFont(ofSize: 11.5, weight: isCurrent ? .semibold : .regular))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .frame(width: (panelWidth - 22) * 0.43, alignment: .leading)
+            .frame(width: (panelWidth - 22) * 0.44, alignment: .leading)
             
-            // Right 55%: Rating controls
-            HStack(spacing: 3) {
+            // Right ~56%: Rating controls
+            HStack(spacing: 2) {
                 Button(action: {
-                    music.setFavoritedForTrack(atIndex: track.id, value: !track.favorited)
-                    refreshTrackInPlaylist(track.id, favorited: !track.favorited)
+                    let nextFav = !isFav
+                    if isCurrent {
+                        music.setFavorited(nextFav)
+                    } else {
+                        music.setFavoritedForTrack(atIndex: track.id, value: nextFav)
+                    }
+                    refreshTrackInPlaylist(track.id, favorited: nextFav, disliked: nextFav ? false : isDis)
                 }) {
-                    Image(systemName: track.favorited ? "heart.fill" : "heart")
-                        .font(.system(size: 10))
-                        .foregroundStyle(track.favorited ? .pink : .secondary)
+                    Image(systemName: isFav ? "heart.fill" : "heart")
+                        .font(.system(size: 12))
+                        .foregroundStyle(isFav ? .pink : .secondary)
+                        .frame(width: 15, height: 18)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 
                 Button(action: {
-                    music.setDislikedForTrack(atIndex: track.id, value: !track.disliked)
-                    refreshTrackInPlaylist(track.id, disliked: !track.disliked)
+                    let nextDis = !isDis
+                    if isCurrent {
+                        music.setDisliked(nextDis)
+                    } else {
+                        music.setDislikedForTrack(atIndex: track.id, value: nextDis)
+                    }
+                    refreshTrackInPlaylist(track.id, favorited: nextDis ? false : isFav, disliked: nextDis)
                 }) {
-                    Image(systemName: track.disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
-                        .font(.system(size: 9))
-                        .foregroundStyle(track.disliked ? .red : .secondary)
+                    Image(systemName: isDis ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isDis ? .red : .secondary)
+                        .frame(width: 15, height: 18)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 
-                Spacer().frame(width: 4)
+                Spacer().frame(width: 2)
                 
                 ForEach(1...5, id: \.self) { star in
                     Button(action: {
-                        let newRating = track.rating == star ? 0 : star
-                        music.setRatingForTrack(atIndex: track.id, stars: newRating)
+                        let newRating = currentRating == star ? 0 : star
+                        if isCurrent {
+                            music.setRating(newRating)
+                        } else {
+                            music.setRatingForTrack(atIndex: track.id, stars: newRating)
+                        }
                         refreshTrackInPlaylist(track.id, rating: newRating)
                     }) {
-                        Image(systemName: star <= track.rating ? "star.fill" : "star")
-                            .font(.system(size: 9))
-                            .foregroundStyle(star <= track.rating ? .yellow : .secondary.opacity(0.5))
+                        Image(systemName: star <= currentRating ? "star.fill" : "star")
+                            .font(.system(size: 11))
+                            .foregroundStyle(star <= currentRating ? .yellow : .secondary.opacity(0.45))
+                            .frame(width: 14, height: 18)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .frame(width: (panelWidth - 22) * 0.57, alignment: .trailing)
+            .frame(width: (panelWidth - 22) * 0.56, alignment: .trailing)
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 4)
+        .padding(.vertical, 3)
         .background(
             RoundedRectangle(cornerRadius: 4)
-                .fill(track.isCurrentTrack ? Color.accentColor.opacity(0.15) : Color.clear)
+                .fill(isCurrent ? Color.accentColor.opacity(0.15) : Color.clear)
         )
     }
 
@@ -441,6 +479,12 @@ struct PopoverView: View {
         switch lyricsSource {
         case .embedded:
             return "LYRICS (EMBEDDED)"
+        case .songLyrics:
+            return "LYRICS (SONGLYRICS)"
+        case .lrclib:
+            return "LYRICS (LRCLIB)"
+        case .lyrica:
+            return "LYRICS (LYRICA)"
         case .genius:
             return "LYRICS (GENIUS)"
         case .none:
@@ -461,7 +505,7 @@ struct PopoverView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
-                .disabled(!settings.hasGeniusKey || lyricsLoading)
+                .disabled(lyricsLoading)
                 
                 Button(action: fetchArtwork) {
                     Label("Fetch Artwork", systemImage: "photo.artframe")
@@ -585,7 +629,7 @@ struct PopoverView: View {
         lyrics = ""
         lyricsSource = .none
         
-        guard settings.settings.autoFetchLyrics, settings.hasGeniusKey else {
+        guard settings.settings.autoFetchLyrics else {
             return
         }
         
@@ -594,11 +638,6 @@ struct PopoverView: View {
     
     private func fetchLyrics() {
         guard let track = music.currentTrack else { return }
-        guard settings.hasGeniusKey else {
-            lyricsError = "No Genius API key"
-            return
-        }
-        
         startLyricsFetch(for: track)
     }
     
@@ -624,16 +663,6 @@ struct PopoverView: View {
     }
     
     private func fetchLyrics(for track: TrackInfo, requestID: UUID) async -> LyricsResult? {
-        guard settings.hasGeniusKey else {
-            await MainActor.run {
-                if activeLyricsRequestID == requestID {
-                    lyricsError = "No Genius API key"
-                    lyricsLoading = false
-                }
-            }
-            return nil
-        }
-        
         await MainActor.run {
             guard isActiveLyricsRequest(requestID, for: track) else { return }
             lyricsLoading = true
@@ -641,10 +670,13 @@ struct PopoverView: View {
         }
         
         do {
-            let result = try await GeniusFetcher.shared.fetchLyrics(
+            let result = try await LyricsService.shared.fetchLyrics(
                 title: track.name,
                 artist: track.artist,
-                apiKey: settings.settings.geniusAPIKey
+                album: track.album,
+                geniusAPIKey: settings.settings.geniusAPIKey,
+                lyricaBaseURL: settings.settings.lyricaBaseURL,
+                preferredProvider: settings.settings.lyricsProvider
             )
             let shouldApply = await MainActor.run {
                 isActiveLyricsRequest(requestID, for: track)
@@ -652,7 +684,13 @@ struct PopoverView: View {
             guard shouldApply else { return nil }
             await MainActor.run {
                 self.lyrics = result.lyrics
-                self.lyricsSource = .genius
+                switch result.provider {
+                case .embedded: self.lyricsSource = .embedded
+                case .songLyrics: self.lyricsSource = .songLyrics
+                case .lrclib: self.lyricsSource = .lrclib
+                case .lyrica: self.lyricsSource = .lyrica
+                case .genius: self.lyricsSource = .genius
+                }
                 self.lyricsLoading = false
             }
             return result
@@ -842,9 +880,22 @@ struct PopoverView: View {
     
     private func loadPlaylist() {
         playlistLoading = true
-        playlistTracks = []
-        playlistTracks = music.fetchPlaylistTracks()
-        playlistLoading = false
+        let tracks = music.fetchPlaylistTracks()
+        self.playlistTracks = tracks
+        self.playlistLoading = false
+        self.syncCurrentTrackInPlaylist()
+    }
+    
+    /// Synchronize playing track's current status into the playlist rows
+    private func syncCurrentTrackInPlaylist() {
+        guard let current = music.currentTrack else { return }
+        for idx in playlistTracks.indices {
+            if playlistTracks[idx].isCurrentTrack {
+                playlistTracks[idx].favorited = current.favorited
+                playlistTracks[idx].disliked = current.disliked
+                playlistTracks[idx].rating = current.rating
+            }
+        }
     }
     
     /// Optimistically update a track in the local playlist array for instant UI feedback.

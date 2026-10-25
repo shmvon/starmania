@@ -68,7 +68,7 @@ class MetadataWriter: @unchecked Sendable {
         let editor = ID3TagEditor()
         let existingTag = try? editor.read(from: filePath)
         
-        var tag = existingTag ?? ID32v3TagBuilder().build()
+        let tag = existingTag ?? ID32v3TagBuilder().build()
         
         // Handle lyrics
         if let lyrics = lyrics {

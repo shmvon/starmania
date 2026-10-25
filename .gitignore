@@ -16,6 +16,7 @@ xcuserdata/
 
 # Gemini/AntiGravity
 .gemini/
+/.project/
  
 # Test files and documentation
 /Ignore
