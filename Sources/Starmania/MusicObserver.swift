@@ -1,47 +1,87 @@
 import Foundation
 import AppKit
 
-/// Bridges Apple Music via AppleScript. Polls for current track info.
-/// All AppleScript calls wrapped in try/on error for robustness.
+/// Bridges Apple Music via AppleScript. Listens for Music's player notifications and
+/// polls as a fallback. All AppleScript runs off the main thread via `AppleScriptRunner`.
 @MainActor
 class MusicObserver: ObservableObject {
     static let shared = MusicObserver()
-    
+
     @Published var currentTrack: TrackInfo?
     @Published var musicRunning: Bool = false
     @Published var errorMessage: String?
-    
+
+    private let runner = AppleScriptRunner.shared
     private var pollTimer: Timer?
+    private var playerInfoObserver: NSObjectProtocol?
     private var lastTrackKey: String = ""
-    
+    private var pollInFlight = false
+    private var pollQueued = false
+    /// Bumped on every local edit, so a poll that started before the edit doesn't overwrite it.
+    private var editGeneration = 0
+
+    /// Fallback poll interval; track changes arrive instantly via the player notification.
+    private let pollInterval: TimeInterval = 4.0
+
     private init() {}
-    
+
     func startPolling() {
-        // Immediate first poll
-        poll()
-        // Then every 2 seconds on common run loop mode
-        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+        requestPoll()
+
+        let timer = Timer(timeInterval: pollInterval, repeats: true) { _ in
             Task { @MainActor in
-                self?.poll()
+                MusicObserver.shared.requestPoll()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
+
+        // Music posts this on every play/pause/track change
+        playerInfoObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.Music.playerInfo"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                MusicObserver.shared.requestPoll()
+            }
+        }
     }
-    
+
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        if let observer = playerInfoObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+            playerInfoObserver = nil
+        }
     }
-    
+
     // MARK: - Polling
-    
-    private func poll() {
-        // Check if Music.app is running
+
+    /// Coalesces poll requests: at most one poll runs at a time, plus one queued.
+    func requestPoll() {
+        if pollInFlight {
+            pollQueued = true
+            return
+        }
+        pollInFlight = true
+        Task {
+            await poll()
+            pollInFlight = false
+            if pollQueued {
+                pollQueued = false
+                requestPoll()
+            }
+        }
+    }
+
+    private func poll() async {
+        // Check if Music.app is running (talking to it would launch it otherwise)
         let running = NSWorkspace.shared.runningApplications.contains {
             $0.bundleIdentifier == "com.apple.Music"
         }
-        
+
         if !running {
             musicRunning = false
             currentTrack = nil
@@ -49,240 +89,232 @@ class MusicObserver: ObservableObject {
             errorMessage = nil
             return
         }
-        
+
         musicRunning = true
-        
-        // Get player state first
-        guard let state = runAppleScript("tell application \"Music\" to player state as string"),
-              state == "playing" || state == "paused" else {
-            currentTrack = nil
-            lastTrackKey = ""
-            return
-        }
-        
-        let isPlaying = (state == "playing")
-        
-        // Get basic track info
-        let script = """
-        tell application "Music"
-            try
-                set t to current track
-                set trackName to name of t
-                set trackArtist to artist of t
-                set trackAlbum to album of t
-                set isFav to favorited of t
-                set isDis to disliked of t
-                set trackRating to rating of t
-                return trackName & "|||" & trackArtist & "|||" & trackAlbum & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string)
-            on error errMsg
-                return "ERROR:" & errMsg
-            end try
-        end tell
-        """
-        
-        guard let result = runAppleScript(script), !result.hasPrefix("ERROR:") else {
+        let generation = editGeneration
+
+        guard let output = await runner.run(Self.pollScript, cache: true) else {
             errorMessage = "Could not read track info"
             return
         }
-        
-        let parts = result.components(separatedBy: "|||")
-        guard parts.count >= 6 else { return }
-        
-        let name = parts[0]
-        let artist = parts[1]
-        let album = parts[2]
-        let favorited = parts[3].lowercased() == "true"
-        let disliked = parts[4].lowercased() == "true"
-        // Apple Music rating is 0-100, convert to 0-5 stars
-        let rawRating = Int(parts[5]) ?? 0
-        let rating = rawRating / 20
-        
-        // Get file path (may fail for streaming)
-        let filePath = runAppleScript("""
-        tell application "Music"
-            try
-                return POSIX path of (location of current track as text)
-            on error
-                return ""
-            end try
-        end tell
-        """)
-        
-        let trackKey = "\(name)|\(artist)|\(album)"
-        let trackChanged = (trackKey != lastTrackKey)
-        
-        // Get artwork and embedded lyrics if track changed
-        var artworkData: Data? = nil
-        var embeddedLyrics: String? = nil
-        if trackChanged {
-            artworkData = fetchArtworkData()
-            embeddedLyrics = fetchEmbeddedLyrics()
-        } else {
-            artworkData = currentTrack?.artworkData
-            embeddedLyrics = currentTrack?.embeddedLyrics
+
+        guard let polled = Self.parsePollOutput(output) else {
+            if output.hasPrefix("ERROR") {
+                errorMessage = "Could not read track info"
+            } else {
+                // Stopped or not playing
+                currentTrack = nil
+                lastTrackKey = ""
+                errorMessage = nil
+            }
+            return
         }
-        
-        let track = TrackInfo(
-            name: name,
-            artist: artist,
-            album: album,
-            favorited: favorited,
-            disliked: disliked,
-            rating: rating,
-            filePath: filePath?.isEmpty == true ? nil : filePath,
-            artworkData: artworkData,
-            embeddedLyrics: embeddedLyrics,
-            isPlaying: isPlaying
-        )
-        
-        lastTrackKey = trackKey
+
+        let trackChanged = (polled.trackKey != lastTrackKey)
+
+        // Get artwork and embedded lyrics only when the track changed
+        var artworkData = currentTrack?.artworkData
+        var embeddedLyrics = currentTrack?.embeddedLyrics
+        if trackChanged {
+            artworkData = await runner.runData(Self.trackScript(polled.persistentID, "return raw data of artwork 1 of t"))
+            embeddedLyrics = await fetchEmbeddedLyrics(persistentID: polled.persistentID)
+        }
+
+        var track = polled
+        track.artworkData = artworkData
+        track.embeddedLyrics = embeddedLyrics
+
+        // A local edit happened while this poll was in flight: keep the optimistic values
+        if generation != editGeneration, !trackChanged, let current = currentTrack {
+            track.favorited = current.favorited
+            track.disliked = current.disliked
+            track.rating = current.rating
+        }
+
+        lastTrackKey = track.trackKey
         self.currentTrack = track
         self.errorMessage = nil
     }
-    
-    // MARK: - Artwork
-    
-    private func fetchArtworkData() -> Data? {
-        // AppleScript raw data approach: write to temp file and read back
-        let tempPath = NSTemporaryDirectory() + "starmania_artwork.tmp"
-        let writeScript = """
-        tell application "Music"
+
+    nonisolated private static let US = "\u{1F}"  // Field separator
+    nonisolated private static let RS = "\u{1E}"  // Record separator
+
+    nonisolated static let pollScript = """
+    tell application "Music"
+        try
+            set US to character id 31
+            set pState to player state as string
+            if pState is not "playing" and pState is not "paused" then return pState
+            set t to current track
+            set loc to ""
             try
-                set artData to raw data of artwork 1 of current track
-                set filePath to POSIX file "\(tempPath)"
-                set fileRef to open for access filePath with write permission
-                set eof fileRef to 0
-                write artData to fileRef
-                close access fileRef
-                return "OK"
-            on error errMsg
-                try
-                    close access filePath
-                end try
-                return "ERROR:" & errMsg
+                set loc to POSIX path of (location of t as text)
             end try
-        end tell
-        """
-        
-        if let result = runAppleScript(writeScript), result == "OK" {
-            let data = try? Data(contentsOf: URL(fileURLWithPath: tempPath))
-            try? FileManager.default.removeItem(atPath: tempPath)
-            return data
-        }
-        
-        return nil
+            set pos to 0
+            try
+                set pos to player position
+            end try
+            set dur to 0
+            try
+                set dur to duration of t
+            end try
+            return pState & US & (persistent ID of t) & US & (name of t) & US & (artist of t) & US & (album of t) & US & (favorited of t as string) & US & (disliked of t as string) & US & (rating of t as string) & US & loc & US & (pos as string) & US & (dur as string)
+        on error errMsg
+            return "ERROR" & errMsg
+        end try
+    end tell
+    """
+
+    /// Parse the poll script's output. Returns nil when nothing is playing or on error.
+    nonisolated static func parsePollOutput(_ output: String) -> TrackInfo? {
+        let parts = output.components(separatedBy: US)
+        guard parts.count >= 11, parts[0] == "playing" || parts[0] == "paused" else { return nil }
+
+        let rawRating = Int(parts[7]) ?? 0
+        return TrackInfo(
+            persistentID: parts[1],
+            name: parts[2],
+            artist: parts[3],
+            album: parts[4],
+            favorited: parts[5].lowercased() == "true",
+            disliked: parts[6].lowercased() == "true",
+            rating: rawRating / 20,  // Apple Music rating is 0-100
+            filePath: parts[8].isEmpty ? nil : parts[8],
+            artworkData: nil,
+            embeddedLyrics: nil,
+            isPlaying: parts[0] == "playing",
+            position: parseNumber(parts[9]),
+            positionDate: Date(),
+            duration: parseNumber(parts[10])
+        )
     }
-    
-    // MARK: - Embedded Lyrics
-    
-    private func fetchEmbeddedLyrics() -> String? {
-        let result = runAppleScript("""
-        tell application "Music"
-            try
-                set lyr to lyrics of current track
-                if lyr is missing value then
-                    return ""
-                end if
-                return lyr
-            on error
-                return ""
-            end try
-        end tell
-        """)
-        
+
+    nonisolated private static func parseNumber(_ text: String) -> Double {
+        Double(text.replacingOccurrences(of: ",", with: ".")) ?? 0
+    }
+
+    private func fetchEmbeddedLyrics(persistentID: String) async -> String? {
+        let result = await runner.run(Self.trackScript(persistentID, """
+            set lyr to lyrics of t
+            if lyr is missing value then return ""
+            return lyr
+            """))
         guard let lyrics = result, !lyrics.isEmpty else { return nil }
         return lyrics
     }
+
+    // MARK: - Track-addressed Scripts
+
+    /// Build a script that resolves the track with `persistentID` as `t` and runs `body`.
+    /// Looks in the current playlist first (so `play t` keeps the playlist context), then the library.
+    nonisolated static func trackScript(_ persistentID: String, _ body: String) -> String {
+        let pid = persistentID.filter { $0.isHexDigit }  // Persistent IDs are hex; prevents script injection
+        return """
+        tell application "Music"
+            try
+                set matches to {}
+                try
+                    set matches to (every track of current playlist whose persistent ID is "\(pid)")
+                end try
+                if matches is {} then
+                    set matches to (every track of library playlist 1 whose persistent ID is "\(pid)")
+                end if
+                if matches is {} then return ""
+                set t to item 1 of matches
+                \(body)
+            on error errMsg
+                return ""
+            end try
+        end tell
+        """
+    }
+
+    nonisolated static func escapeForAppleScript(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Run a write script, then re-poll so the UI reflects what Music actually stored.
+    private func runWrite(_ script: String, repollAfter delay: Double = 0) {
+        editGeneration += 1
+        Task {
+            _ = await runner.run(script)
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            requestPoll()
+        }
+    }
+
+    private func resolvedID(_ trackID: String?) -> String? {
+        trackID ?? currentTrack?.persistentID
+    }
+
+    private func isCurrent(_ trackID: String?) -> Bool {
+        trackID == nil || trackID == currentTrack?.persistentID
+    }
+
     // MARK: - Update Artwork from External Fetch
-    
+
     func updateArtwork(_ data: Data) {
         currentTrack?.artworkData = data
     }
-    
+
     // MARK: - Write Back to Apple Music
-    
-    func setFavorited(_ value: Bool) {
-        currentTrack?.favorited = value
-        if value {
-            currentTrack?.disliked = false
+
+    /// Set favorited for the given track (nil = current track).
+    func setFavorited(_ value: Bool, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        if isCurrent(trackID) {
+            currentTrack?.favorited = value
+            if value { currentTrack?.disliked = false }
         }
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set favorited of current track to \(value)
-            end try
-        end tell
-        """)
-        poll()
+        runWrite(Self.trackScript(pid, "set favorited of t to \(value)"))
     }
-    
-    func setDisliked(_ value: Bool) {
-        currentTrack?.disliked = value
-        if value {
-            currentTrack?.favorited = false
+
+    /// Set disliked for the given track (nil = current track).
+    func setDisliked(_ value: Bool, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        if isCurrent(trackID) {
+            currentTrack?.disliked = value
+            if value { currentTrack?.favorited = false }
         }
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set disliked of current track to \(value)
-            end try
-        end tell
-        """)
-        poll()
+        runWrite(Self.trackScript(pid, "set disliked of t to \(value)"))
     }
-    
-    func setRating(_ stars: Int) {
-        currentTrack?.rating = stars
+
+    /// Set the star rating (0-5) for the given track (nil = current track).
+    func setRating(_ stars: Int, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        let stars = max(0, min(5, stars))
+        if isCurrent(trackID) {
+            currentTrack?.rating = stars
+        }
         // Apple Music rating is 0-100, where each star = 20
-        let ratingValue = stars * 20
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set rating of current track to \(ratingValue)
-            end try
-        end tell
-        """)
-        poll()
+        runWrite(Self.trackScript(pid, "set rating of t to \(stars * 20)"))
     }
-    
-    func setLyrics(_ lyrics: String) {
-        // Escape quotes and backslashes for AppleScript string
-        let escaped = lyrics
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set lyrics of current track to "\(escaped)"
-            end try
-        end tell
-        """)
-        
-        // Update local state without waiting for poll
-        currentTrack?.embeddedLyrics = lyrics
-        poll()
+
+    /// Store lyrics in Music's own database (used for streaming tracks).
+    func setLyrics(_ lyrics: String, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        if isCurrent(trackID) {
+            currentTrack?.embeddedLyrics = lyrics.isEmpty ? nil : lyrics
+        }
+        runWrite(Self.trackScript(pid, "set lyrics of t to \"\(Self.escapeForAppleScript(lyrics))\""))
     }
-    
+
     func deleteArtwork() {
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                delete artworks of current track
-            end try
-        end tell
-        """)
+        guard let pid = currentTrack?.persistentID else { return }
         currentTrack?.artworkData = nil
-        poll()
+        runWrite(Self.trackScript(pid, "delete artworks of t"))
     }
-    
+
     // MARK: - Playback Controls
-    
+
     func play() {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Music") {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
         }
-        let _ = runAppleScript("""
+        runWrite("""
         tell application "Music"
             try
                 set stateBeforePlay to player state
@@ -309,417 +341,208 @@ class MusicObserver: ObservableObject {
                 end try
             end try
         end tell
-        """)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.poll()
-        }
-    }
-    
-    func playPause() {
-        let _ = runAppleScript("tell application \"Music\" to playpause")
-        // Quick re-poll to update play state
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.poll()
-        }
-    }
-    
-    func nextTrack() {
-        let _ = runAppleScript("tell application \"Music\" to next track")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.poll()
-        }
-    }
-    
-    func previousTrack() {
-        let _ = runAppleScript("tell application \"Music\" to previous track")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.poll()
-        }
-    }
-    
-    // MARK: - Playlist / Album Track List
-    
-    /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
-    func fetchPlaylistTracks() -> [PlaylistTrackInfo] {
-        return Self.fetchPlaylistTracksInternal()
+        """, repollAfter: 0.3)
     }
 
-    private static func fetchPlaylistTracksInternal() -> [PlaylistTrackInfo] {
-        // Step 1: Get track count and current track index
-        // Try to identify if we are playing an album or playlist, using fast checks
-        let infoScript = """
+    func playPause() {
+        currentTrack?.isPlaying.toggle()
+        runWrite("tell application \"Music\" to playpause", repollAfter: 0.2)
+    }
+
+    func nextTrack() {
+        runWrite("tell application \"Music\" to next track", repollAfter: 0.3)
+    }
+
+    func previousTrack() {
+        runWrite("tell application \"Music\" to previous track", repollAfter: 0.3)
+    }
+
+    /// Play a specific track (by persistent ID) within the current playlist.
+    func playTrack(id: String) {
+        runWrite(Self.trackScript(id, "play t"), repollAfter: 0.3)
+    }
+
+    // MARK: - Playlist / Album Track List
+
+    /// AppleScript prefix that resolves `mode` ("album" or "playlist") and `spec`, a reference
+    /// to up to `window` tracks around the current one. Album mode applies when playing from
+    /// the library, where "current playlist" is the whole library.
+    nonisolated private static func sourceScript(window: Int, body: String) -> String {
+        """
         tell application "Music"
             try
+                set US to character id 31
+                set RS to character id 30
                 set ct to current track
-                set ctName to name of ct
-                set ctArtist to artist of ct
-                
-                -- Check if playing an album from the main library playlist
+                set ctPID to persistent ID of ct
+                set isLib to false
                 try
-                    set isLib to false
-                    try
-                        if special kind of current playlist is Music then
-                            set isLib to true
-                        end if
-                    end try
-                    try
-                        set plName to name of current playlist
-                        if plName is "Music" or plName is "Library" or plName is "Muziek" or plName is "Musique" or plName is "Musik" or plName is "Música" then
-                            set isLib to true
-                        end if
-                    end try
-                    
-                    if isLib then
-                        set ctAlbum to album of ct
-                        set ctAlbumArtist to ""
-                        try
-                            set ctAlbumArtist to album artist of ct
-                        end try
-                        if ctAlbumArtist is "" then
-                            set ctAlbumArtist to ctArtist
-                        end if
-                        if ctAlbum is not "" then
-                            if ctAlbumArtist is not "" then
-                                set trackList to (every track of current playlist whose album is ctAlbum and (album artist is ctAlbumArtist or artist is ctAlbumArtist))
-                            else
-                                set trackList to (every track of current playlist whose album is ctAlbum)
-                            end if
-                            set total to count of trackList
-                            if total > 0 then
-                                set idx to 0
-                                repeat with i from 1 to total
-                                    set t to item i of trackList
-                                    if name of t is ctName then
-                                        set idx to i
-                                        exit repeat
-                                    end if
-                                end repeat
-                                if idx > 0 then
-                                    return (idx as string) & "|||" & (total as string) & "|||album"
-                                end if
-                            end if
-                        end if
-                    end if
+                    set k to special kind of current playlist as string
+                    if k is "Library" or k is "Music" then set isLib to true
                 end try
-
-                -- Try current playlist next (standard playlist)
-                try
+                if not isLib then
+                    try
+                        if name of current playlist is in {"Music", "Library", "Muziek", "Bibliotheek", "Musique", "Bibliothèque", "Musik", "Mediathek", "Música", "Biblioteca"} then set isLib to true
+                    end try
+                end if
+                set ctAlbum to album of ct
+                if isLib and ctAlbum is not "" then
+                    set mode to "album"
+                    set aa to ""
+                    try
+                        set aa to album artist of ct
+                    end try
+                    if aa is "" then set aa to artist of ct
+                    set spec to a reference to (every track of current playlist whose album is ctAlbum and (album artist is aa or artist is aa))
+                else
+                    set mode to "playlist"
                     set src to current playlist
                     set total to count of tracks of src
-                    set idx to index of ct
-                    -- Fast O(1) verification: check if track at this index matches ctName and ctArtist
-                    set verified to false
+                    if total is 0 then return "ERROR empty"
+                    set idx to 0
                     try
-                        set t to track idx of src
-                        if name of t is ctName and artist of t is ctArtist then
-                            set verified to true
-                        end if
+                        set i0 to index of ct
+                        if persistent ID of track i0 of src is ctPID then set idx to i0
                     end try
-                    if verified then
-                        return (idx as string) & "|||" & (total as string) & "|||playlist"
-                    else if total < 100 then
-                        -- Only loop if playlist is small
-                        set foundIdx to 0
-                        repeat with i from 1 to total
-                            set t to track i of src
-                            if name of t is ctName and artist of t is ctArtist then
-                                set foundIdx to i
+                    if idx is 0 and total ≤ 5000 then
+                        set allPIDs to persistent ID of every track of src
+                        repeat with i from 1 to count of allPIDs
+                            if item i of allPIDs is ctPID then
+                                set idx to i
                                 exit repeat
                             end if
                         end repeat
-                        if foundIdx > 0 then
-                            return (foundIdx as string) & "|||" & (total as string) & "|||playlist"
-                        end if
                     end if
-                end try
-                
-                -- Fallback: container of current track
-                try
-                    set src to container of ct
-                    set total to count of tracks of src
-                    set idx to index of ct
-                    return (idx as string) & "|||" & (total as string) & "|||container"
-                end try
-                
-                return "ERROR"
+                    if idx is 0 then set idx to 1
+                    set s to idx - \(window / 2)
+                    if s < 1 then set s to 1
+                    set e to s + \(window - 1)
+                    if e > total then
+                        set e to total
+                        set s to e - \(window - 1)
+                        if s < 1 then set s to 1
+                    end if
+                    set spec to a reference to (tracks s thru e of src)
+                end if
+                set AppleScript's text item delimiters to RS
+                \(body)
             on error errMsg
-                return "ERROR"
+                return "ERROR" & errMsg
             end try
         end tell
         """
-        
-        guard let info = runAppleScriptDirect(infoScript), info != "ERROR" else {
-            print("[Starmania] Playlist info script returned ERROR or nil")
-            return []
-        }
-        
-        let parts = info.components(separatedBy: "|||")
-        guard parts.count >= 3,
-              let currentIndex = Int(parts[0]),
-              let totalTracks = Int(parts[1]) else {
-            print("[Starmania] Could not parse playlist info: \(info)")
-            return []
-        }
-        
-        let sourceType = parts[2]  // "album", "playlist", or "container"
-        
-        // Calculate window: up to 40 tracks centered on current track
-        let windowSize = 40
-        var startIndex: Int
-        var endIndex: Int
-        
-        if totalTracks <= windowSize {
-            startIndex = 1
-            endIndex = totalTracks
-        } else {
-            let halfWindow = windowSize / 2
-            startIndex = max(1, currentIndex - halfWindow)
-            endIndex = startIndex + windowSize - 1
-            if endIndex > totalTracks {
-                endIndex = totalTracks
-                startIndex = max(1, endIndex - windowSize + 1)
-            }
-        }
-        
-        // Step 2: Fetch track data for the window
-        let fetchScript: String
-        if sourceType == "album" {
-            fetchScript = """
-            tell application "Music"
-                try
-                    set ct to current track
-                    set ctName to name of ct
-                    set ctArtist to artist of ct
-                    set ctAlbum to album of ct
-                    set ctAlbumArtist to ""
-                    try
-                        set ctAlbumArtist to album artist of ct
-                    end try
-                    if ctAlbumArtist is "" then
-                        set ctAlbumArtist to ctArtist
-                    end if
-                    if ctAlbumArtist is not "" then
-                        set trackList to (every track of current playlist whose album is ctAlbum and (album artist is ctAlbumArtist or artist is ctAlbumArtist))
-                    else
-                        set trackList to (every track of current playlist whose album is ctAlbum)
-                    end if
-                    set trackListWindow to items \(startIndex) thru \(endIndex) of trackList
-                    set output to ""
-                    repeat with t in trackListWindow
-                        set trackName to name of t
-                        set trackArtist to artist of t
-                        set isFav to favorited of t
-                        set isDis to disliked of t
-                        set trackRating to rating of t
-                        set trackIdx to index of t
-                        set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                        set trackLine to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
-                        if output is "" then
-                            set output to trackLine
-                        else
-                            set output to output & "^^^" & trackLine
-                        end if
-                    end repeat
-                    return output
-                on error errMsg
-                    return "ERROR:" & errMsg
-                end try
-            end tell
-            """
-        } else {
-            let sourceRef = sourceType == "playlist" ? "current playlist" : "container of current track"
-            fetchScript = """
-            tell application "Music"
-                try
-                    set ct to current track
-                    set ctName to name of ct
-                    set ctArtist to artist of ct
-                    set src to \(sourceRef)
-                    set trackListWindow to tracks \(startIndex) thru \(endIndex) of src
-                    set output to ""
-                    try
-                        set nameList to name of trackListWindow
-                        set artistList to artist of trackListWindow
-                        set favList to favorited of trackListWindow
-                        set disList to disliked of trackListWindow
-                        set ratingList to rating of trackListWindow
-                        set idxList to index of trackListWindow
-                        set winCount to count of nameList
-                        repeat with i from 1 to winCount
-                            set trackName to item i of nameList
-                            set trackArtist to item i of artistList
-                            set isFav to (item i of favList) as string
-                            set isDis to (item i of disList) as string
-                            set trackRating to (item i of ratingList) as string
-                            set trackIdx to (item i of idxList) as string
-                            set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                            set trackLine to trackName & "|||" & trackArtist & "|||" & isFav & "|||" & isDis & "|||" & trackRating & "|||" & trackIdx & "|||" & isCurrent
-                            if output is "" then
-                                set output to trackLine
-                            else
-                                set output to output & "^^^" & trackLine
-                            end if
-                        end repeat
-                    on error
-                        repeat with t in trackListWindow
-                            set trackName to name of t
-                            set trackArtist to artist of t
-                            set isFav to favorited of t
-                            set isDis to disliked of t
-                            set trackRating to rating of t
-                            set trackIdx to index of t
-                            set isCurrent to (trackName = ctName and trackArtist = ctArtist) as string
-                            set trackLine to trackName & "|||" & trackArtist & "|||" & (isFav as string) & "|||" & (isDis as string) & "|||" & (trackRating as string) & "|||" & (trackIdx as string) & "|||" & isCurrent
-                            if output is "" then
-                                set output to trackLine
-                            else
-                                set output to output & "^^^" & trackLine
-                            end if
-                        end repeat
-                    end try
-                    return output
-                on error errMsg
-                    return "ERROR:" & errMsg
-                end try
-            end tell
-            """
-        }
-        
-        guard let result = runAppleScriptDirect(fetchScript), !result.hasPrefix("ERROR:") else {
-            print("[Starmania] Playlist fetch script failed")
-            return []
-        }
-        
-        let lines = result.components(separatedBy: "^^^")
-        var tracks: [PlaylistTrackInfo] = []
-        
-        for line in lines {
-            let fields = line.components(separatedBy: "|||")
-            guard fields.count >= 7 else { continue }
-            
-            let name = fields[0]
-            let artist = fields[1]
-            let favorited = fields[2].lowercased() == "true"
-            let disliked = fields[3].lowercased() == "true"
-            let rawRating = Int(fields[4]) ?? 0
-            let rating = rawRating / 20
-            let trackIndex = Int(fields[5]) ?? 0
-            let isCurrent = fields[6].lowercased() == "true"
-            
-            tracks.append(PlaylistTrackInfo(
-                id: trackIndex,
-                name: name,
-                artist: artist,
-                favorited: favorited,
-                disliked: disliked,
-                rating: rating,
-                isCurrentTrack: isCurrent
-            ))
-        }
-        
-        print("[Starmania] Loaded \(tracks.count) playlist tracks via \(sourceType)")
-        return tracks
-    }
-    
-    /// Play a specific track by its index in the current playlist/album container.
-    func playTrackAtIndex(_ index: Int) {
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                play track \(index) of current playlist
-            on error
-                try
-                    set src to container of current track
-                    play track \(index) of src
-                end try
-            end try
-        end tell
-        """)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.poll()
-        }
-    }
-    
-    /// Set favorited for a specific track by index in the current playlist container.
-    func setFavoritedForTrack(atIndex index: Int, value: Bool) {
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set favorited of track \(index) of current playlist to \(value)
-            on error
-                try
-                    set src to container of current track
-                    set favorited of track \(index) of src to \(value)
-                end try
-            end try
-        end tell
-        """)
-        if currentTrack != nil {
-            poll()
-        }
-    }
-    
-    /// Set disliked for a specific track by index in the current playlist container.
-    func setDislikedForTrack(atIndex index: Int, value: Bool) {
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set disliked of track \(index) of current playlist to \(value)
-            on error
-                try
-                    set src to container of current track
-                    set disliked of track \(index) of src to \(value)
-                end try
-            end try
-        end tell
-        """)
-        if currentTrack != nil {
-            poll()
-        }
-    }
-    
-    /// Set rating for a specific track by index in the current playlist container.
-    func setRatingForTrack(atIndex index: Int, stars: Int) {
-        let ratingValue = stars * 20
-        let _ = runAppleScript("""
-        tell application "Music"
-            try
-                set rating of track \(index) of current playlist to \(ratingValue)
-            on error
-                try
-                    set src to container of current track
-                    set rating of track \(index) of src to \(ratingValue)
-                end try
-            end try
-        end tell
-        """)
-        if currentTrack != nil {
-            poll()
-        }
-    }
-    
-    // MARK: - AppleScript Runner
-    
-    @discardableResult
-    private func runAppleScript(_ source: String) -> String? {
-        return Self.runAppleScriptDirect(source)
     }
 
-    @discardableResult
-    static func runAppleScriptDirect(_ source: String) -> String? {
-        var error: NSDictionary?
-        let script = NSAppleScript(source: source)
-        let result = script?.executeAndReturnError(&error)
-        
-        if let error = error {
-            let errorMsg = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
-            // Don't spam logs for expected errors (Music not playing, etc.)
-            if !errorMsg.contains("Can't get current track") {
-                print("[Starmania] AppleScript error: \(errorMsg)")
-            }
-            return nil
+    nonisolated static let playlistScript = sourceScript(window: 40, body: """
+        return mode & US & ctPID & US & ((persistent ID of spec) as text) & US & ((name of spec) as text) & US & ((artist of spec) as text) & US & ((favorited of spec) as text) & US & ((disliked of spec) as text) & US & ((rating of spec) as text) & US & ((disc number of spec) as text) & US & ((track number of spec) as text)
+        """)
+
+    /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
+    func fetchPlaylistTracks() async -> [PlaylistTrackInfo] {
+        guard let output = await runner.run(Self.playlistScript, cache: true) else { return [] }
+        let tracks = Self.parsePlaylistOutput(output)
+        if tracks.isEmpty {
+            print("[Starmania] Could not load playlist: \(output.prefix(200))")
         }
-        
-        return result?.stringValue
+        return tracks
+    }
+
+    nonisolated static func parsePlaylistOutput(_ output: String, window: Int = 40) -> [PlaylistTrackInfo] {
+        let parts = output.components(separatedBy: US)
+        guard parts.count >= 10, parts[0] == "album" || parts[0] == "playlist" else { return [] }
+
+        let currentID = parts[1]
+        let lists = parts[2...].map { $0.components(separatedBy: RS) }
+        let (ids, names, artists, favs, dislikes, ratings, discs, numbers) =
+            (lists[0], lists[1], lists[2], lists[3], lists[4], lists[5], lists[6], lists[7])
+        let count = ids.count
+        guard count > 0, [names, artists, favs, dislikes, ratings].allSatisfy({ $0.count == count }) else { return [] }
+
+        var rows: [(track: PlaylistTrackInfo, disc: Int, number: Int)] = (0..<count).map { i in
+            let track = PlaylistTrackInfo(
+                id: ids[i],
+                name: names[i],
+                artist: artists[i],
+                favorited: favs[i].lowercased() == "true",
+                disliked: dislikes[i].lowercased() == "true",
+                rating: (Int(ratings[i]) ?? 0) / 20,
+                isCurrentTrack: ids[i] == currentID
+            )
+            let disc = discs.count == count ? Int(discs[i]) ?? 0 : 0
+            let number = numbers.count == count ? Int(numbers[i]) ?? 0 : 0
+            return (track, disc, number)
+        }
+
+        guard parts[0] == "album" else { return rows.map(\.track) }
+
+        // Albums: sort by disc/track number and window around the current track
+        rows.sort { ($0.disc, $0.number) < ($1.disc, $1.number) }
+        let tracks = rows.map(\.track)
+        guard tracks.count > window else { return tracks }
+        let currentIndex = tracks.firstIndex(where: \.isCurrentTrack) ?? 0
+        var start = max(0, currentIndex - window / 2)
+        let end = min(tracks.count, start + window)
+        start = max(0, end - window)
+        return Array(tracks[start..<end])
+    }
+
+    // MARK: - Bulk Candidates
+
+    struct BulkTrack: Equatable {
+        let persistentID: String
+        let name: String
+        let artist: String
+        let album: String
+        let filePath: String?
+        let hasLyrics: Bool
+        let hasArtwork: Bool
+    }
+
+    nonisolated static let bulkScript = sourceScript(window: 200, body: """
+        set out to {}
+        set trackList to contents of spec
+        repeat with t in trackList
+            try
+                set loc to ""
+                try
+                    set loc to POSIX path of (location of t as text)
+                end try
+                set hasLyr to "false"
+                try
+                    set lyr to lyrics of t
+                    if lyr is not missing value and lyr is not "" then set hasLyr to "true"
+                end try
+                set artCount to 0
+                try
+                    set artCount to count of artworks of t
+                end try
+                set end of out to (persistent ID of t) & US & (name of t) & US & (artist of t) & US & (album of t) & US & loc & US & hasLyr & US & (artCount as string)
+            end try
+        end repeat
+        return mode & RS & (out as text)
+        """)
+
+    /// Tracks of the current album (or up to 200 of the current playlist) with what they're missing.
+    func fetchBulkTracks() async -> [BulkTrack] {
+        guard let output = await runner.run(Self.bulkScript, cache: true) else { return [] }
+        return Self.parseBulkOutput(output)
+    }
+
+    nonisolated static func parseBulkOutput(_ output: String) -> [BulkTrack] {
+        let records = output.components(separatedBy: RS)
+        guard let mode = records.first, mode == "album" || mode == "playlist" else { return [] }
+        return records.dropFirst().compactMap { record in
+            let f = record.components(separatedBy: US)
+            guard f.count >= 7 else { return nil }
+            return BulkTrack(
+                persistentID: f[0],
+                name: f[1],
+                artist: f[2],
+                album: f[3],
+                filePath: f[4].isEmpty ? nil : f[4],
+                hasLyrics: f[5] == "true",
+                hasArtwork: (Int(f[6]) ?? 0) > 0
+            )
+        }
     }
 }

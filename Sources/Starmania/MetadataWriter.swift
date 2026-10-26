@@ -36,29 +36,41 @@ class MetadataWriter: @unchecked Sendable {
         return destURL
     }
     
-    // MARK: - ID3 Writing
+    // MARK: - Tag Writing
     
-    func writeToFile(filePath: String, lyrics: String?, artworkData: Data?) throws {
-        let ext = URL(fileURLWithPath: filePath).pathExtension.lowercased()
-        switch ext {
-        case "mp3":
+    /// Write lyrics and/or artwork into the file's tags. `nil` leaves a field untouched,
+    /// an empty value removes it. Runs off the main actor (nonisolated async).
+    func writeToFile(filePath: String, lyrics: String?, artworkData: Data?) async throws {
+        switch Self.format(of: filePath) {
+        case .mp3:
             try writeID3(filePath: filePath, lyrics: lyrics, artworkData: artworkData)
-        case "m4a", "m4p", "aac":
-            try writeMP4(filePath: filePath, lyrics: lyrics, artworkData: artworkData)
-        default:
-            throw MetadataError.unsupportedFormat(ext)
+        case .m4a:
+            try await writeMP4(filePath: filePath, lyrics: lyrics, artworkData: artworkData)
+        case nil:
+            throw MetadataError.unsupportedFormat(URL(fileURLWithPath: filePath).pathExtension.lowercased())
         }
     }
     
-    func checkExistingMetadata(filePath: String) -> (hasLyrics: Bool, hasArtwork: Bool) {
-        let ext = URL(fileURLWithPath: filePath).pathExtension.lowercased()
-        switch ext {
-        case "mp3":
+    func checkExistingMetadata(filePath: String) async -> (hasLyrics: Bool, hasArtwork: Bool) {
+        switch Self.format(of: filePath) {
+        case .mp3:
             return checkID3Metadata(filePath: filePath)
-        case "m4a", "m4p", "aac":
-            return checkMP4Metadata(filePath: filePath)
-        default:
+        case .m4a:
+            return await checkMP4Metadata(filePath: filePath)
+        case nil:
             return (false, false)
+        }
+    }
+    
+    enum TagFormat { case mp3, m4a }
+    
+    /// Only plain MP3 and MPEG-4 audio are writable. Raw ADTS `.aac` has no tag container
+    /// and `.m4p` is DRM-protected, so both are rejected rather than re-muxed.
+    static func format(of filePath: String) -> TagFormat? {
+        switch URL(fileURLWithPath: filePath).pathExtension.lowercased() {
+        case "mp3": return .mp3
+        case "m4a": return .m4a
+        default: return nil
         }
     }
     
@@ -94,27 +106,24 @@ class MetadataWriter: @unchecked Sendable {
             }
         }
         
-        guard !tag.frames.isEmpty else {
-            throw MetadataError.writeError("No metadata to write")
-        }
-        
         try editor.write(tag: tag, to: filePath)
     }
     
-    private func writeMP4(filePath: String, lyrics: String?, artworkData: Data?) throws {
+    private func writeMP4(filePath: String, lyrics: String?, artworkData: Data?) async throws {
         let url = URL(fileURLWithPath: filePath)
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension(url.pathExtension)
+            .appendingPathExtension("m4a")
         
         defer { try? FileManager.default.removeItem(at: tempURL) }
         
-        let fileType: AVFileType = .m4a
-        
-        var metadataItems = asset.metadata.filter { item in
-            guard let id = item.identifier else { return false }
-            return id != .iTunesMetadataLyrics && id != .iTunesMetadataCoverArt
+        let existing = try await asset.load(.metadata)
+        var metadataItems = existing.filter { item in
+            guard let id = item.identifier else { return true }
+            if lyrics != nil && id == .iTunesMetadataLyrics { return false }
+            if artworkData != nil && id == .iTunesMetadataCoverArt { return false }
+            return true
         }.compactMap { $0.mutableCopy() as? AVMutableMetadataItem }
         
         if let lyrics = lyrics, !lyrics.isEmpty {
@@ -135,23 +144,21 @@ class MetadataWriter: @unchecked Sendable {
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
             throw MetadataError.writeError("Could not create AVAssetExportSession")
         }
-        
-        exportSession.outputURL = tempURL
-        exportSession.outputFileType = fileType
         exportSession.metadata = metadataItems
         
-        let semaphore = DispatchSemaphore(value: 0)
-        var exportError: Error?
-        
-        exportSession.exportAsynchronously {
-            exportError = exportSession.error
-            semaphore.signal()
-        }
-        
-        semaphore.wait()
-        
-        if let error = exportError {
-            throw MetadataError.writeError("Export failed: \(error.localizedDescription)")
+        if #available(macOS 15, *) {
+            do {
+                try await exportSession.export(to: tempURL, as: .m4a)
+            } catch {
+                throw MetadataError.writeError("Export failed: \(error.localizedDescription)")
+            }
+        } else {
+            exportSession.outputURL = tempURL
+            exportSession.outputFileType = .m4a
+            await exportSession.export()
+            if let error = exportSession.error {
+                throw MetadataError.writeError("Export failed: \(error.localizedDescription)")
+            }
         }
         
         guard FileManager.default.fileExists(atPath: tempURL.path) else {
@@ -177,11 +184,11 @@ class MetadataWriter: @unchecked Sendable {
         return (hasLyrics, hasArtwork)
     }
     
-    private func checkMP4Metadata(filePath: String) -> (hasLyrics: Bool, hasArtwork: Bool) {
-        let url = URL(fileURLWithPath: filePath)
-        let asset = AVAsset(url: url)
-        let hasLyrics = asset.metadata.contains { $0.identifier == .iTunesMetadataLyrics }
-        let hasArtwork = asset.metadata.contains { $0.identifier == .iTunesMetadataCoverArt }
+    private func checkMP4Metadata(filePath: String) async -> (hasLyrics: Bool, hasArtwork: Bool) {
+        let asset = AVURLAsset(url: URL(fileURLWithPath: filePath))
+        let metadata = (try? await asset.load(.metadata)) ?? []
+        let hasLyrics = metadata.contains { $0.identifier == .iTunesMetadataLyrics }
+        let hasArtwork = metadata.contains { $0.identifier == .iTunesMetadataCoverArt }
         return (hasLyrics, hasArtwork)
     }
     

@@ -176,12 +176,19 @@ swift build -c release --disable-sandbox --build-path "$BUILD_PATH"
 INFO_PLIST_SRC="$WORKSPACE_DIR/Info.plist"
 BUNDLE_EXEC=$(plutil -extract CFBundleExecutable raw "$INFO_PLIST_SRC" 2>/dev/null || echo "Starmania")
 
-BINARY_SRC="$BUILD_PATH/arm64-apple-macosx/release/$BUNDLE_EXEC"
-if [ ! -f "$BINARY_SRC" ]; then
-    BINARY_SRC="$BUILD_PATH/release/$BUNDLE_EXEC"
-fi
-if [ ! -f "$BINARY_SRC" ]; then
-    BINARY_SRC=$(find "$BUILD_PATH" -type f -name "$BUNDLE_EXEC" -perm +111 | head -n 1)
+# Output layout differs between SwiftPM versions; only ever pick a release binary
+BINARY_SRC=""
+for candidate in \
+    "$BUILD_PATH/out/Products/Release/$BUNDLE_EXEC" \
+    "$BUILD_PATH/arm64-apple-macosx/release/$BUNDLE_EXEC" \
+    "$BUILD_PATH/release/$BUNDLE_EXEC"; do
+    if [ -f "$candidate" ]; then
+        BINARY_SRC="$candidate"
+        break
+    fi
+done
+if [ -z "$BINARY_SRC" ]; then
+    BINARY_SRC=$(find "$BUILD_PATH" -type f -name "$BUNDLE_EXEC" -perm +111 -ipath "*release*" | head -n 1)
 fi
 
 if [ ! -f "$BINARY_SRC" ]; then

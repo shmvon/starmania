@@ -1,43 +1,32 @@
 import SwiftUI
 import AppKit
-import Combine
+
+/// Panel state owned by the app delegate: visibility and the ⌥ key (sampled only while visible).
+@MainActor
+final class PanelState: ObservableObject {
+    @Published var isVisible = false
+    @Published var isOptionPressed = false
+}
 
 // MARK: - Main Popover View
 
 struct PopoverView: View {
-    @StateObject private var music = MusicObserver.shared
-    @StateObject private var settings = SettingsManager.shared
-    
-    @State private var lyrics: String = ""
-    @State private var lyricsSource: LyricsSource = .none
-    @State private var lyricsLoading: Bool = false
-    @State private var lyricsError: String?
+    @ObservedObject private var music = MusicObserver.shared
+    @ObservedObject private var controller = NowPlayingController.shared
+    @ObservedObject var panel: PanelState
+    let onShowSettingsMenu: () -> Void
+
     @State private var showPlaybackControls: Bool = false
-    @State private var statusMessage: String?
-    @State private var statusIsError: Bool = false
-    @State private var didInitialLoad: Bool = false
-    @State private var isOptionPressed: Bool = false
-    @State private var activeLyricsRequestID = UUID()
-    @State private var pendingLyricsFileWrites: [String: String] = [:]
-    
+    @State private var showSyncedLyrics: Bool = true
+
     // Playlist view state
     @State private var showPlaylist: Bool = false
     @State private var playlistTracks: [PlaylistTrackInfo] = []
     @State private var playlistLoading: Bool = false
-    
-    let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
-    
-    enum LyricsSource {
-        case none
-        case embedded
-        case songLyrics
-        case lrclib
-        case lyrica
-        case genius
-    }
-    
+    @State private var playlistRequestID = UUID()
+
     private let panelWidth: CGFloat = 250
-    
+
     var body: some View {
         VStack(spacing: 0) {
             if let track = music.currentTrack {
@@ -58,68 +47,47 @@ struct PopoverView: View {
         .fixedSize(horizontal: false, vertical: true)  // Size to content, don't stretch
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 10))
-        .onChange(of: music.currentTrack?.trackKey) { oldKey, newKey in
-            if oldKey != newKey {
-                onTrackChanged()
-            }
+        .onChange(of: music.currentTrack?.trackKey) { _, _ in
+            if showPlaylist { loadPlaylist() }
         }
-        .onChange(of: music.currentTrack?.rating) { _, _ in
-            syncCurrentTrackInPlaylist()
-        }
-        .onChange(of: music.currentTrack?.favorited) { _, _ in
-            syncCurrentTrackInPlaylist()
-        }
-        .onChange(of: music.currentTrack?.disliked) { _, _ in
-            syncCurrentTrackInPlaylist()
-        }
-        .onAppear {
-            // Handle initial load (onChange doesn't fire for the first value)
-            if !didInitialLoad {
-                didInitialLoad = true
-                onTrackChanged()
-            }
-        }
-        .onReceive(timer) { _ in
-            let pressed = NSEvent.modifierFlags.contains(.option)
-            if pressed != isOptionPressed {
-                isOptionPressed = pressed
-            }
+        .onChange(of: panel.isVisible) { _, visible in
+            if visible && showPlaylist { loadPlaylist() }
         }
     }
-    
+
     // MARK: - Track View
-    
+
     @ViewBuilder
     private func trackView(_ track: TrackInfo) -> some View {
         let artSize = panelWidth - 20  // 10pt padding each side
-        
+
         VStack(spacing: 5) {
             // Row 1: Favorite, Dislike, Stars
             ratingBar(track)
                 .padding(.top, 10)
                 .padding(.horizontal, 10)
-            
+
             // Row 2: Artwork with playback overlay
             artworkView(track, size: artSize)
                 .padding(.horizontal, 10)
-            
+
             // Row 3: Track info
             VStack(spacing: 2) {
                 Text(track.name)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
-                
+
                 Text(track.artist)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                
+
                 Text(track.album)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
-                
+
                 if !track.isLocal {
                     Label("Streaming", systemImage: "cloud")
                         .font(.system(size: 10))
@@ -127,40 +95,56 @@ struct PopoverView: View {
                 }
             }
             .padding(.horizontal, 10)
-            
-            // Status message
-            if let msg = statusMessage {
+
+            // Bulk progress or status message
+            if let progress = controller.bulkProgress {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.mini)
+                    Text(progress)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Button("Stop") { controller.cancelBulkFetch() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10))
+                }
+                .padding(.horizontal, 10)
+            } else if let msg = controller.statusMessage {
                 Text(msg)
                     .font(.system(size: 10))
-                    .foregroundStyle(statusIsError ? .red : .green)
+                    .foregroundStyle(controller.statusIsError ? .red : .green)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 10)
                     .transition(.opacity)
             }
-            
+
             // Toggle bar: Lyrics vs Playlist
             viewToggleBar()
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
-            
+
             Divider()
-            
+
             // Row 4: Lyrics or Playlist
             if showPlaylist {
                 playlistSection()
             } else {
                 lyricsSection()
-                
+
                 Divider().padding(.vertical, 3)
-                
+
                 // Row 5: Action buttons (only in lyrics mode)
                 actionButtons(track)
                     .padding(.horizontal, 10)
                     .padding(.bottom, 10)
             }
         }
+        .animation(.default, value: controller.statusMessage)
     }
-    
+
     // MARK: - Rating Bar
-    
+
     private func ratingBar(_ track: TrackInfo) -> some View {
         HStack(spacing: 8) {
             Button(action: { music.setFavorited(!track.favorited) }) {
@@ -169,16 +153,18 @@ struct PopoverView: View {
                     .foregroundStyle(track.favorited ? .pink : .secondary)
             }
             .buttonStyle(.plain)
-            
+            .help("Favorite (⌃⌥F)")
+
             Button(action: { music.setDisliked(!track.disliked) }) {
                 Image(systemName: track.disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
                     .font(.system(size: 14))
                     .foregroundStyle(track.disliked ? .red : .secondary)
             }
             .buttonStyle(.plain)
-            
+            .help("Dislike (⌃⌥D)")
+
             Spacer()
-            
+
             HStack(spacing: 3) {
                 ForEach(1...5, id: \.self) { star in
                     Button(action: {
@@ -189,13 +175,14 @@ struct PopoverView: View {
                             .foregroundStyle(star <= track.rating ? .yellow : .secondary)
                     }
                     .buttonStyle(.plain)
+                    .help("Rate \(star) (⌃⌥\(star))")
                 }
             }
         }
     }
-    
+
     // MARK: - Artwork
-    
+
     private func artworkView(_ track: TrackInfo, size: CGFloat) -> some View {
         ZStack {
             if let data = track.artworkData, let nsImage = NSImage(data: data) {
@@ -215,25 +202,25 @@ struct PopoverView: View {
                             .foregroundStyle(.quaternary)
                     }
             }
-            
+
             if showPlaybackControls {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(.black.opacity(0.4))
                     .frame(width: size, height: size)
-                
+
                 HStack(spacing: 22) {
                     Button(action: { music.previousTrack() }) {
                         Image(systemName: "backward.fill")
                             .font(.system(size: 18))
                             .foregroundStyle(.white)
                     }.buttonStyle(.plain)
-                    
+
                     Button(action: { music.playPause() }) {
                         Image(systemName: track.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 26))
                             .foregroundStyle(.white)
                     }.buttonStyle(.plain)
-                    
+
                     Button(action: { music.nextTrack() }) {
                         Image(systemName: "forward.fill")
                             .font(.system(size: 18))
@@ -248,28 +235,33 @@ struct PopoverView: View {
             }
         }
     }
-    
+
     // MARK: - Lyrics
-    
+
+    private var hasSyncedLyrics: Bool { !controller.syncedLines.isEmpty }
+
     private func lyricsSection() -> some View {
         VStack(spacing: 2) {
             lyricsHeader()
                 .padding(.horizontal, 10)
 
-            if lyricsLoading {
+            if controller.lyricsLoading {
                 ProgressView("Fetching...")
                     .font(.system(size: 11))
                     .padding(.vertical, 12)
-            } else if let error = lyricsError {
+            } else if let error = controller.lyricsError {
                 Text(error)
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
                     .padding(.vertical, 8)
                     .padding(.horizontal, 10)
-            } else if !lyrics.isEmpty {
+            } else if hasSyncedLyrics && showSyncedLyrics {
+                syncedLyricsView()
+                    .frame(height: 280)
+            } else if !controller.lyrics.isEmpty {
                 ScrollView {
-                    Text(lyrics)
+                    Text(controller.lyrics)
                         .font(.system(size: 11.5))
                         .foregroundStyle(.primary.opacity(0.85))
                         .textSelection(.enabled)
@@ -285,9 +277,46 @@ struct PopoverView: View {
             }
         }
     }
-    
+
+    /// Time-synced lyrics: highlights the current line and keeps it centered.
+    private func syncedLyricsView() -> some View {
+        let lines = controller.syncedLines
+        return TimelineView(.animation(minimumInterval: 0.25, paused: !panel.isVisible)) { context in
+            let time = music.currentTrack?.estimatedPosition(at: context.date) ?? 0
+            let currentIndex = LRCParser.currentLineIndex(in: lines, at: time)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 5) {
+                        ForEach(lines) { line in
+                            let isCurrent = line.id == currentIndex
+                            Text(line.text.isEmpty ? "♪" : line.text)
+                                .font(.system(size: 11.5, weight: isCurrent ? .semibold : .regular))
+                                .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(line.id)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 120)  // Lets the first and last lines reach the center
+                }
+                .onChange(of: currentIndex) { _, index in
+                    guard let index else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        proxy.scrollTo(index, anchor: .center)
+                    }
+                }
+                .onAppear {
+                    if let currentIndex {
+                        proxy.scrollTo(currentIndex, anchor: .center)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - View Toggle Bar
-    
+
     private func viewToggleBar() -> some View {
         HStack(spacing: 0) {
             Button(action: { showPlaylist = false }) {
@@ -304,7 +333,7 @@ struct PopoverView: View {
             }
             .buttonStyle(.plain)
             .help("Lyrics")
-            
+
             Button(action: {
                 showPlaylist = true
                 loadPlaylist()
@@ -326,12 +355,12 @@ struct PopoverView: View {
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
     }
-    
+
     // MARK: - Playlist Section
-    
+
     private func playlistSection() -> some View {
         VStack(spacing: 0) {
-            if playlistLoading {
+            if playlistLoading && playlistTracks.isEmpty {
                 ProgressView("Loading playlist...")
                     .font(.system(size: 11))
                     .padding(.vertical, 12)
@@ -355,20 +384,24 @@ struct PopoverView: View {
                         .padding(.trailing, 10)
                     }
                     .frame(height: 280)
-                    .onAppear {
-                        if let current = playlistTracks.first(where: { $0.isCurrentTrack }) {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                withAnimation {
-                                    proxy.scrollTo(current.id, anchor: .center)
-                                }
-                            }
-                        }
+                    .onAppear { scrollToCurrent(proxy) }
+                    .onChange(of: playlistTracks.first(where: \.isCurrentTrack)?.id) { _, _ in
+                        scrollToCurrent(proxy)
                     }
                 }
             }
         }
     }
-    
+
+    private func scrollToCurrent(_ proxy: ScrollViewProxy) {
+        guard let current = playlistTracks.first(where: { $0.isCurrentTrack }) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            withAnimation {
+                proxy.scrollTo(current.id, anchor: .center)
+            }
+        }
+    }
+
     private func playlistRow(_ track: PlaylistTrackInfo) -> some View {
         let isCurrent = track.isCurrentTrack
         let isFav = isCurrent ? (music.currentTrack?.favorited ?? track.favorited) : track.favorited
@@ -378,27 +411,19 @@ struct PopoverView: View {
         return HStack(spacing: 0) {
             // Left ~44%: Song title (click to play, marquee on hover)
             Button(action: {
-                music.playTrackAtIndex(track.id)
-                // Refresh playlist after a short delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                    loadPlaylist()
-                }
+                music.playTrack(id: track.id)
             }) {
                 MarqueeText(text: track.name, font: .systemFont(ofSize: 11.5, weight: isCurrent ? .semibold : .regular))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
             .frame(width: (panelWidth - 22) * 0.44, alignment: .leading)
-            
+
             // Right ~56%: Rating controls
             HStack(spacing: 2) {
                 Button(action: {
                     let nextFav = !isFav
-                    if isCurrent {
-                        music.setFavorited(nextFav)
-                    } else {
-                        music.setFavoritedForTrack(atIndex: track.id, value: nextFav)
-                    }
+                    music.setFavorited(nextFav, trackID: track.id)
                     refreshTrackInPlaylist(track.id, favorited: nextFav, disliked: nextFav ? false : isDis)
                 }) {
                     Image(systemName: isFav ? "heart.fill" : "heart")
@@ -408,14 +433,10 @@ struct PopoverView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                
+
                 Button(action: {
                     let nextDis = !isDis
-                    if isCurrent {
-                        music.setDisliked(nextDis)
-                    } else {
-                        music.setDislikedForTrack(atIndex: track.id, value: nextDis)
-                    }
+                    music.setDisliked(nextDis, trackID: track.id)
                     refreshTrackInPlaylist(track.id, favorited: nextDis ? false : isFav, disliked: nextDis)
                 }) {
                     Image(systemName: isDis ? "hand.thumbsdown.fill" : "hand.thumbsdown")
@@ -425,17 +446,13 @@ struct PopoverView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                
+
                 Spacer().frame(width: 2)
-                
+
                 ForEach(1...5, id: \.self) { star in
                     Button(action: {
                         let newRating = currentRating == star ? 0 : star
-                        if isCurrent {
-                            music.setRating(newRating)
-                        } else {
-                            music.setRatingForTrack(atIndex: track.id, stars: newRating)
-                        }
+                        music.setRating(newRating, trackID: track.id)
                         refreshTrackInPlaylist(track.id, rating: newRating)
                     }) {
                         Image(systemName: star <= currentRating ? "star.fill" : "star")
@@ -458,113 +475,106 @@ struct PopoverView: View {
     }
 
     private func lyricsHeader() -> some View {
-        HStack {
+        HStack(spacing: 6) {
             Text(lyricsHeaderTitle)
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.tertiary)
             Spacer()
-            Button(action: {
-                NSApp.sendAction(NSSelectorFromString("showSettingsMenu"), to: nil, from: nil)
-            }) {
+            if hasSyncedLyrics {
+                Button(action: { showSyncedLyrics.toggle() }) {
+                    Image(systemName: showSyncedLyrics ? "text.alignleft" : "waveform")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(showSyncedLyrics ? "Show plain lyrics" : "Show synced lyrics")
+            }
+            Button(action: onShowSettingsMenu) {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Settings & API Key")
+            .help("Settings")
         }
     }
 
     private var lyricsHeaderTitle: String {
-        switch lyricsSource {
-        case .embedded:
-            return "LYRICS (EMBEDDED)"
-        case .songLyrics:
-            return "LYRICS (SONGLYRICS)"
-        case .lrclib:
-            return "LYRICS (LRCLIB)"
-        case .lyrica:
-            return "LYRICS (LYRICA)"
-        case .genius:
-            return "LYRICS (GENIUS)"
-        case .none:
-            return "LYRICS"
-        }
+        guard let source = controller.lyricsSource else { return "LYRICS" }
+        let synced = hasSyncedLyrics ? ", SYNCED" : ""
+        return "LYRICS (\(source.displayName.uppercased())\(synced))"
     }
-    
+
     // MARK: - Action Buttons
-    
+
     private func actionButtons(_ track: TrackInfo) -> some View {
-        VStack(spacing: 4) {
+        let option = panel.isOptionPressed
+        let hasLyrics = !controller.lyrics.isEmpty
+
+        return VStack(spacing: 4) {
             // Row 1: Fetch (left=lyrics, right=artwork)
             HStack(spacing: 4) {
-                Button(action: fetchLyrics) {
+                Button(action: controller.fetchLyrics) {
                     Label("Fetch Lyrics", systemImage: "text.magnifyingglass")
                         .font(.system(size: 10, weight: .medium))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
-                .disabled(lyricsLoading)
-                
-                Button(action: fetchArtwork) {
+                .disabled(controller.lyricsLoading)
+
+                Button(action: controller.fetchArtwork) {
                     Label("Fetch Artwork", systemImage: "photo.artframe")
                         .font(.system(size: 10, weight: .medium))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
+                .disabled(controller.artworkLoading)
             }
-            
-            // Row 2: Write to ID3 tag (left=lyrics, right=artwork)
+
+            // Row 2: Write to file tag (left=lyrics, right=artwork); ⌥ switches to delete
             if track.isLocal {
                 HStack(spacing: 4) {
                     Button(action: {
-                        if isOptionPressed {
-                            deleteLyricsFromFile(track)
-                        } else {
-                            writeLyricsToFile(track)
-                        }
+                        if option { controller.deleteLyrics() } else { controller.writeLyricsToFile() }
                     }) {
-                        Label(isOptionPressed ? "Delete Lyrics" : "Write Lyrics", systemImage: isOptionPressed ? "trash" : "tag")
+                        Label(option ? "Delete Lyrics" : "Write Lyrics", systemImage: option ? "trash" : "tag")
                             .font(.system(size: 10, weight: .medium))
                             .frame(maxWidth: .infinity)
-                            .foregroundStyle(isOptionPressed ? .red : .primary)
+                            .foregroundStyle(option ? .red : .primary)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(lyrics.isEmpty && !isOptionPressed)
-                    
+                    .disabled(!hasLyrics && !option)
+
                     Button(action: {
-                        if isOptionPressed {
-                            deleteArtworkFromFile(track)
-                        } else {
-                            writeArtworkToFile(track)
-                        }
+                        if option { controller.deleteArtwork() } else { controller.writeArtworkToFile() }
                     }) {
-                        Label(isOptionPressed ? "Delete Artwork" : "Write Artwork", systemImage: isOptionPressed ? "trash" : "tag")
+                        Label(option ? "Delete Artwork" : "Write Artwork", systemImage: option ? "trash" : "tag")
                             .font(.system(size: 10, weight: .medium))
                             .frame(maxWidth: .infinity)
-                            .foregroundStyle(isOptionPressed ? .red : .primary)
+                            .foregroundStyle(option ? .red : .primary)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(track.artworkData == nil && !isOptionPressed)
+                    .disabled(track.artworkData == nil && !option)
                 }
+                .help("Hold ⌥ to delete instead")
             }
-            
+
             // Row 3: Copy to clipboard (left=lyrics, right=artwork)
             HStack(spacing: 4) {
-                Button(action: copyLyrics) {
+                Button(action: controller.copyLyrics) {
                     Label("Copy Lyrics", systemImage: "doc.on.doc")
                         .font(.system(size: 10, weight: .medium))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
-                .disabled(lyrics.isEmpty)
-                
-                Button(action: { copyArtwork(track) }) {
+                .disabled(!hasLyrics)
+
+                Button(action: controller.copyArtwork) {
                     Label("Copy Artwork", systemImage: "doc.on.doc")
                         .font(.system(size: 10, weight: .medium))
                         .frame(maxWidth: .infinity)
@@ -575,9 +585,9 @@ struct PopoverView: View {
             }
         }
     }
-    
+
     // MARK: - Empty State
-    
+
     private func emptyState(_ message: String, icon: String, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
         VStack(spacing: 8) {
             Image(systemName: icon)
@@ -586,7 +596,7 @@ struct PopoverView: View {
             Text(message)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            
+
             if let title = actionTitle, let act = action {
                 Button(action: act) {
                     Text(title)
@@ -599,307 +609,23 @@ struct PopoverView: View {
         }
         .frame(width: panelWidth, height: 120)
     }
-    
-    // MARK: - Actions
-    
-    private func onTrackChanged() {
-        flushPendingLyricsFileWrites()
-        invalidateLyricsRequest()
-        lyricsLoading = false
-        lyricsError = nil
-        statusMessage = nil
-        statusIsError = false
-        
-        if showPlaylist {
-            loadPlaylist()
-        }
-        
-        guard let track = music.currentTrack else {
-            lyrics = ""
-            lyricsSource = .none
-            return
-        }
-        
-        if let embedded = normalizedLyrics(track.embeddedLyrics) {
-            lyrics = embedded
-            lyricsSource = .embedded
-            return
-        }
-        
-        lyrics = ""
-        lyricsSource = .none
-        
-        guard settings.settings.autoFetchLyrics else {
-            return
-        }
-        
-        startLyricsFetch(for: track)
-    }
-    
-    private func fetchLyrics() {
-        guard let track = music.currentTrack else { return }
-        startLyricsFetch(for: track)
-    }
-    
-    private func startLyricsFetch(for track: TrackInfo) {
-        let requestID = UUID()
-        activeLyricsRequestID = requestID
-        
-        Task {
-            let result = await fetchLyrics(for: track, requestID: requestID)
-            guard let result else { return }
 
-            // Evaluate activity and auto-write checks on the MainActor sequentially
-            let isActive = await MainActor.run { isActiveLyricsRequest(requestID, for: track) }
-            guard isActive else { return }
-
-            let shouldAutoWrite = await MainActor.run { shouldAutoWriteFetchedLyrics(for: track) }
-            guard shouldAutoWrite else { return }
-
-            await MainActor.run {
-                writeLyricsToFile(track, lyrics: result.lyrics)
-            }
-        }
-    }
-    
-    private func fetchLyrics(for track: TrackInfo, requestID: UUID) async -> LyricsResult? {
-        await MainActor.run {
-            guard isActiveLyricsRequest(requestID, for: track) else { return }
-            lyricsLoading = true
-            lyricsError = nil
-        }
-        
-        do {
-            let result = try await LyricsService.shared.fetchLyrics(
-                title: track.name,
-                artist: track.artist,
-                album: track.album,
-                geniusAPIKey: settings.settings.geniusAPIKey,
-                lyricaBaseURL: settings.settings.lyricaBaseURL,
-                preferredProvider: settings.settings.lyricsProvider
-            )
-            let shouldApply = await MainActor.run {
-                isActiveLyricsRequest(requestID, for: track)
-            }
-            guard shouldApply else { return nil }
-            await MainActor.run {
-                self.lyrics = result.lyrics
-                switch result.provider {
-                case .embedded: self.lyricsSource = .embedded
-                case .songLyrics: self.lyricsSource = .songLyrics
-                case .lrclib: self.lyricsSource = .lrclib
-                case .lyrica: self.lyricsSource = .lyrica
-                case .genius: self.lyricsSource = .genius
-                }
-                self.lyricsLoading = false
-            }
-            return result
-        } catch {
-            let shouldApply = await MainActor.run {
-                isActiveLyricsRequest(requestID, for: track)
-            }
-            guard shouldApply else { return nil }
-            await MainActor.run {
-                self.lyricsError = error.localizedDescription
-                self.lyricsLoading = false
-            }
-            return nil
-        }
-    }
-    
-    private func fetchArtwork() {
-        guard let track = music.currentTrack else { return }
-        showStatus("Fetching artwork...")
-        
-        Task {
-            do {
-                let query = "\(track.artist) \(track.album)"
-                    .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                let url = URL(string: "https://itunes.apple.com/search?term=\(query)&entity=album&limit=1")!
-                let (data, _) = try await URLSession.shared.data(from: url)
-                
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let results = json["results"] as? [[String: Any]],
-                   let first = results.first,
-                   let artworkURL = first["artworkUrl100"] as? String {
-                    let highRes = artworkURL.replacingOccurrences(of: "100x100", with: "600x600")
-                    if let url = URL(string: highRes) {
-                        let (imageData, _) = try await URLSession.shared.data(from: url)
-                        await MainActor.run {
-                            music.updateArtwork(imageData)
-                            showStatus("Artwork fetched ✓")
-                        }
-                        return
-                    }
-                }
-                await MainActor.run { showStatus("No artwork found") }
-            } catch {
-                await MainActor.run { showStatus("Fetch failed") }
-            }
-        }
-    }
-    
-    private func writeLyricsToFile(_ track: TrackInfo) {
-        writeLyricsToFile(track, lyrics: lyrics)
-    }
-    
-    private func writeLyricsToFile(_ track: TrackInfo, lyrics: String) {
-        if let path = track.filePath {
-            // Writing metadata on the active Music track can interrupt playback,
-            // so local tracks are persisted via the file tag only.
-            if shouldDeferLyricsFileWrite(for: track) {
-                pendingLyricsFileWrites[path] = lyrics
-                music.currentTrack?.embeddedLyrics = lyrics
-                showStatus("Lyrics queued for file write ✓")
-            } else {
-                do {
-                    try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
-                    music.currentTrack?.embeddedLyrics = lyrics
-                    showStatus("Lyrics → File ✓")
-                } catch {
-                    showStatus("Lyrics write failed", isError: true)
-                }
-            }
-        } else {
-            music.setLyrics(lyrics)
-            showStatus("Lyrics → Music ✓")
-        }
-    }
-    
-    private func invalidateLyricsRequest() {
-        activeLyricsRequestID = UUID()
-    }
-    
-    private func isActiveLyricsRequest(_ requestID: UUID, for track: TrackInfo) -> Bool {
-        activeLyricsRequestID == requestID && music.currentTrack?.trackKey == track.trackKey
-    }
-    
-    private func normalizedLyrics(_ lyrics: String?) -> String? {
-        guard let lyrics else { return nil }
-        let trimmed = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-    
-    private func shouldAutoWriteFetchedLyrics(for track: TrackInfo) -> Bool {
-        guard settings.settings.autoWriteLyrics else { return false }
-        return track.isLocal
-    }
-
-    private func shouldDeferLyricsFileWrite(for track: TrackInfo) -> Bool {
-        guard let path = track.filePath else { return false }
-        return music.currentTrack?.filePath == path
-    }
-
-    private func flushPendingLyricsFileWrites() {
-        let currentPath = music.currentTrack?.filePath
-        let writesToFlush = pendingLyricsFileWrites.filter { $0.key != currentPath }
-        guard !writesToFlush.isEmpty else { return }
-
-        for (path, lyrics) in writesToFlush {
-            do {
-                try MetadataWriter.shared.writeToFile(filePath: path, lyrics: lyrics, artworkData: nil)
-                pendingLyricsFileWrites.removeValue(forKey: path)
-            } catch {
-                showStatus("Deferred lyrics write failed", isError: true)
-            }
-        }
-    }
-    
-    private func writeArtworkToFile(_ track: TrackInfo) {
-        guard let path = track.filePath else { return }
-        do {
-            try MetadataWriter.shared.writeToFile(filePath: path, lyrics: nil, artworkData: track.artworkData)
-            showStatus("Artwork → ID3 ✓")
-        } catch {
-            showStatus("Error: \(error.localizedDescription)")
-        }
-    }
-    
-    private func deleteLyricsFromFile(_ track: TrackInfo) {
-        if let path = track.filePath {
-            if shouldDeferLyricsFileWrite(for: track) {
-                pendingLyricsFileWrites[path] = ""
-                music.currentTrack?.embeddedLyrics = nil
-                showStatus("Lyrics deletion queued ✓", isError: true)
-            } else {
-                do {
-                    try MetadataWriter.shared.writeToFile(filePath: path, lyrics: "", artworkData: nil)
-                    music.currentTrack?.embeddedLyrics = nil
-                    showStatus("Lyrics deleted ✓", isError: true)
-                } catch {
-                    showStatus("Lyrics deleted (ID3 err)", isError: true)
-                }
-            }
-        } else {
-            music.setLyrics("")
-            showStatus("Lyrics deleted ✓", isError: true)
-        }
-    }
-    
-    private func deleteArtworkFromFile(_ track: TrackInfo) {
-        music.deleteArtwork()
-        
-        if let path = track.filePath {
-            do {
-                try MetadataWriter.shared.writeToFile(filePath: path, lyrics: nil, artworkData: Data())
-                showStatus("Artwork deleted ✓", isError: true)
-            } catch {
-                showStatus("Artwork deleted (ID3 err)", isError: true)
-            }
-        } else {
-            showStatus("Artwork deleted ✓", isError: true)
-        }
-    }
-    
-    private func copyLyrics() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(lyrics, forType: .string)
-        showStatus("Lyrics copied ✓")
-    }
-    
-    private func copyArtwork(_ track: TrackInfo) {
-        guard let data = track.artworkData, let image = NSImage(data: data) else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.writeObjects([image])
-        showStatus("Artwork copied ✓")
-    }
-    
-    private func showStatus(_ message: String, isError: Bool = false) {
-        withAnimation { 
-            statusMessage = message
-            statusIsError = isError
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            withAnimation { statusMessage = nil }
-        }
-    }
-    
     // MARK: - Playlist Helpers
-    
+
     private func loadPlaylist() {
+        let requestID = UUID()
+        playlistRequestID = requestID
         playlistLoading = true
-        let tracks = music.fetchPlaylistTracks()
-        self.playlistTracks = tracks
-        self.playlistLoading = false
-        self.syncCurrentTrackInPlaylist()
-    }
-    
-    /// Synchronize playing track's current status into the playlist rows
-    private func syncCurrentTrackInPlaylist() {
-        guard let current = music.currentTrack else { return }
-        for idx in playlistTracks.indices {
-            if playlistTracks[idx].isCurrentTrack {
-                playlistTracks[idx].favorited = current.favorited
-                playlistTracks[idx].disliked = current.disliked
-                playlistTracks[idx].rating = current.rating
-            }
+        Task {
+            let tracks = await music.fetchPlaylistTracks()
+            guard playlistRequestID == requestID else { return }
+            playlistTracks = tracks
+            playlistLoading = false
         }
     }
-    
+
     /// Optimistically update a track in the local playlist array for instant UI feedback.
-    private func refreshTrackInPlaylist(_ trackId: Int, favorited: Bool? = nil, disliked: Bool? = nil, rating: Int? = nil) {
+    private func refreshTrackInPlaylist(_ trackId: String, favorited: Bool? = nil, disliked: Bool? = nil, rating: Int? = nil) {
         guard let idx = playlistTracks.firstIndex(where: { $0.id == trackId }) else { return }
         if let fav = favorited { playlistTracks[idx].favorited = fav }
         if let dis = disliked { playlistTracks[idx].disliked = dis }

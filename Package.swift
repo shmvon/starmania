@@ -13,5 +13,9 @@ let package = Package(
             name: "Starmania",
             dependencies: ["ID3TagEditor", "SwiftSoup"]
         ),
+        .testTarget(
+            name: "StarmaniaTests",
+            dependencies: ["Starmania"]
+        ),
     ]
 )

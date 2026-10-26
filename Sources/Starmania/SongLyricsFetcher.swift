@@ -8,7 +8,7 @@ class SongLyricsFetcher: @unchecked Sendable {
     private init() {}
 
     func fetchLyrics(title: String, artist: String) async throws -> LyricsResult {
-        let cleanTitle = stripBrackets(title)
+        let cleanTitle = TextMatching.stripBrackets(title)
         let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Attempt 1: Direct slug URL
@@ -38,16 +38,8 @@ class SongLyricsFetcher: @unchecked Sendable {
         let html = try await fetchHTML(from: url)
         let lyrics = try parseLyrics(from: html, url: urlString)
 
-        let formatted = """
-        \(artist) - \(title)
-
-        \(lyrics)
-
-        Lyrics: \(urlString)
-        """
-
         return LyricsResult(
-            lyrics: formatted,
+            lyrics: lyrics,
             sourceURL: urlString,
             songTitle: title,
             artistName: artist,
@@ -58,40 +50,39 @@ class SongLyricsFetcher: @unchecked Sendable {
     // MARK: - Search Fallback
 
     private func searchAndFetch(artist: String, title: String) async throws -> LyricsResult {
-        let query = "\(artist) \(title)"
-            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let searchURLString = "https://www.songlyrics.com/index.php?section=search&searchW=\(query)&submit=Search"
-
-        guard let searchURL = URL(string: searchURLString) else {
-            throw SongLyricsError.invalidQuery(searchURLString)
+        guard let searchURL = TextMatching.url("https://www.songlyrics.com/index.php", query: [
+            ("section", "search"), ("searchW", "\(artist) \(title)"), ("submit", "Search")
+        ]) else {
+            throw SongLyricsError.invalidQuery("search")
         }
 
         let html = try await fetchHTML(from: searchURL)
         let doc = try SwiftSoup.parse(html)
 
-        // Find track links in search results
-        let links = try doc.select("table.tracklist a[href*=\"-lyrics/\"]")
-        guard let firstLink = links.first(), let targetURL = try? firstLink.attr("href"), !targetURL.isEmpty else {
-            throw SongLyricsError.noResults("No lyrics found for '\(title)' by '\(artist)' on SongLyrics.com")
+        // Score each result by title + artist match instead of trusting the first hit
+        var best: (url: String, score: Double)?
+        for link in try doc.select("table.tracklist a[href*=\"-lyrics/\"]") {
+            let href = try link.attr("href")
+            guard !href.isEmpty else { continue }
+            let linkTitle = TextMatching.stripBrackets(try link.text())
+            let context = try (link.parent()?.parent()?.text() ?? "")
+            let titleScore = TextMatching.wordOverlapScore(title, linkTitle)
+            // The row text contains more than the artist, so only require the artist name to appear in it
+            let artistFound = TextMatching.normalizeForMatching(context)
+                .contains(TextMatching.normalizeForMatching(artist))
+            guard titleScore >= 0.6, artistFound else { continue }
+            if titleScore > (best?.score ?? 0) { best = (href, titleScore) }
         }
 
-        guard let url = URL(string: targetURL) else {
-            throw SongLyricsError.invalidQuery(targetURL)
+        guard let targetURL = best?.url, let url = URL(string: targetURL) else {
+            throw SongLyricsError.noResults("No lyrics found for '\(title)' by '\(artist)' on SongLyrics.com")
         }
 
         let pageHTML = try await fetchHTML(from: url)
         let lyrics = try parseLyrics(from: pageHTML, url: targetURL)
 
-        let formatted = """
-        \(artist) - \(title)
-
-        \(lyrics)
-
-        Lyrics: \(targetURL)
-        """
-
         return LyricsResult(
-            lyrics: formatted,
+            lyrics: lyrics,
             sourceURL: targetURL,
             songTitle: title,
             artistName: artist,
@@ -157,15 +148,6 @@ class SongLyricsFetcher: @unchecked Sendable {
         s = s.replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
         s = s.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return s
-    }
-
-    private func stripBrackets(_ text: String) -> String {
-        let stripped = text.replacingOccurrences(
-            of: "[\\(\\[].*?[\\)\\]]",
-            with: "",
-            options: .regularExpression
-        )
-        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

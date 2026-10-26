@@ -12,7 +12,7 @@ class GeniusFetcher: @unchecked Sendable {
     /// Search Genius for a song and scrape its lyrics.
     func fetchLyrics(title: String, artist: String, apiKey: String) async throws -> LyricsResult {
         // Step 1: Clean the title — strip bracketed/parenthesized suffixes
-        let coreTitle = stripBrackets(title)
+        let coreTitle = TextMatching.stripBrackets(title)
         let cleanTitle = coreTitle
             .replacingOccurrences(of: "'", with: " ")
             .replacingOccurrences(of: "\u{2018}", with: " ")
@@ -23,8 +23,9 @@ class GeniusFetcher: @unchecked Sendable {
             .replacingOccurrences(of: "\u{2018}", with: " ")
             .replacingOccurrences(of: "\u{2019}", with: " ")
         
-        let query = "\(cleanArtist) \(cleanTitle)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let searchURL = URL(string: "https://api.genius.com/search?q=\(query)")!
+        guard let searchURL = TextMatching.url("https://api.genius.com/search", query: [("q", "\(cleanArtist) \(cleanTitle)")]) else {
+            throw GeniusError.invalidURL("genius search")
+        }
         
         var request = URLRequest(url: searchURL)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -78,8 +79,6 @@ class GeniusFetcher: @unchecked Sendable {
         }
         
         // Step 5: Score each candidate by artist + title match quality
-        let normalizedArtist = normalizeForMatching(artist)
-        let normalizedTitle = normalizeForMatching(coreTitle)
         
         var scored: [(hit: [String: Any], score: Double)] = candidates.compactMap { hit in
             guard let result = hit["result"] as? [String: Any],
@@ -87,11 +86,8 @@ class GeniusFetcher: @unchecked Sendable {
                   let hitArtistName = primaryArtist["name"] as? String,
                   let hitTitle = result["title"] as? String else { return nil }
             
-            let normalizedHitArtist = normalizeForMatching(hitArtistName)
-            let normalizedHitTitle = normalizeForMatching(stripBrackets(hitTitle))
-            
-            let artistScore = wordOverlapScore(normalizedArtist, normalizedHitArtist)
-            let titleScore = wordOverlapScore(normalizedTitle, normalizedHitTitle)
+            let artistScore = TextMatching.wordOverlapScore(artist, hitArtistName)
+            let titleScore = TextMatching.wordOverlapScore(coreTitle, TextMatching.stripBrackets(hitTitle))
             
             // Artist must match reasonably well (at least 50% word overlap)
             guard artistScore >= 0.5 else { return nil }
@@ -129,61 +125,13 @@ class GeniusFetcher: @unchecked Sendable {
         // Step 6: Scrape lyrics from the Genius page
         let rawLyrics = try await scrapeLyrics(from: pageURL)
         
-        // Format the lyrics exactly as requested
-        let formattedLyrics = """
-        \(artistName) - \(songTitle)
-        
-        \(rawLyrics)
-        
-        Lyrics: \(pageURL)
-        """
-        
         return LyricsResult(
-            lyrics: formattedLyrics,
-            geniusURL: pageURL,
+            lyrics: rawLyrics,
+            sourceURL: pageURL,
             songTitle: songTitle,
-            artistName: artistName
+            artistName: artistName,
+            provider: .genius
         )
-    }
-    
-    // MARK: - Text Normalization
-    
-    /// Strip bracketed/parenthesized suffixes: "(Remastered 2017)", "[Deluxe Edition]", "(feat. X)", etc.
-    private func stripBrackets(_ text: String) -> String {
-        // Remove all (...) and [...] groups
-        let stripped = text.replacingOccurrences(
-            of: "[\\(\\[].*?[\\)\\]]",
-            with: "",
-            options: .regularExpression
-        )
-        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    
-    /// Normalize text for fuzzy matching: lowercase, strip diacritics, strip punctuation, collapse spaces
-    private func normalizeForMatching(_ text: String) -> String {
-        var s = text.lowercased()
-        // Strip diacritics
-        s = s.folding(options: .diacriticInsensitive, locale: .current)
-        // Remove "the " prefix
-        if s.hasPrefix("the ") { s = String(s.dropFirst(4)) }
-        // Remove punctuation and extra whitespace
-        s = s.replacingOccurrences(of: "[^a-z0-9 ]", with: " ", options: .regularExpression)
-        s = s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        return s.trimmingCharacters(in: .whitespaces)
-    }
-    
-    /// Compute word overlap score between two normalized strings (0.0 – 1.0).
-    /// Returns the average of (fraction of a's words found in b) and (fraction of b's words found in a).
-    private func wordOverlapScore(_ a: String, _ b: String) -> Double {
-        let wordsA = Set(a.split(separator: " ").map(String.init))
-        let wordsB = Set(b.split(separator: " ").map(String.init))
-        
-        guard !wordsA.isEmpty && !wordsB.isEmpty else { return 0.0 }
-        
-        let aInB = Double(wordsA.filter { wordsB.contains($0) }.count) / Double(wordsA.count)
-        let bInA = Double(wordsB.filter { wordsA.contains($0) }.count) / Double(wordsB.count)
-        
-        return (aInB + bInA) / 2.0
     }
     
     // MARK: - Lyrics Scraping

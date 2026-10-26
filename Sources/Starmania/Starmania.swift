@@ -7,7 +7,7 @@ struct StarmaniaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        Settings {
+        MenuBarExtra("Starmania", isInserted: .constant(false)) {
             EmptyView()
         }
     }
@@ -19,8 +19,11 @@ struct StarmaniaApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var panelWindow: NSPanel?
+    private let panelState = PanelState()
+    private var settingsWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var clickMonitor: Any?
+    private var modifierTimer: Timer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon
@@ -32,17 +35,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup floating panel (no arrow, unlike NSPopover)
         setupPanel()
         
-        // Start music observer
+        // Start music observer and the lyrics/artwork controller
+        NowPlayingController.shared.start()
         MusicObserver.shared.startPolling()
-        
-        // Suppress any phantom window created by SwiftUI scene
-        suppressExtraneousWindows()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(windowDidBecomeKey(_:)),
-            name: NSWindow.didBecomeKeyNotification,
-            object: nil
-        )
         
         // Observe track changes to update menu bar icon
         MusicObserver.shared.$currentTrack
@@ -51,31 +46,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateStatusIcon()
             }
             .store(in: &cancellables)
+        
+        // Global rating hotkeys follow the setting
+        SettingsManager.shared.$settings
+            .map(\.ratingHotkeysEnabled)
+            .removeDuplicates()
+            .sink { enabled in
+                HotkeyManager.shared.setEnabled(enabled)
+            }
+            .store(in: &cancellables)
     }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        suppressExtraneousWindows()
+    
+    /// Write any queued tag changes before quitting, so they aren't lost.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MusicObserver.shared.stopPolling()
+        Task {
+            await NowPlayingController.shared.flushAllPendingWrites()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         return false
-    }
-
-    private func suppressExtraneousWindows() {
-        for window in NSApplication.shared.windows {
-            if window !== panelWindow {
-                window.close()
-                window.orderOut(nil)
-            }
-        }
-    }
-
-    @objc private func windowDidBecomeKey(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
-        if window !== panelWindow {
-            window.close()
-            window.orderOut(nil)
-        }
     }
     
     // MARK: - Status Item
@@ -92,9 +85,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
-        guard let event = NSApp.currentEvent else { return }
+        let event = NSApp.currentEvent
+        let isOption = event?.modifierFlags.contains(.option) ?? false
+        let isRight = event?.type == .rightMouseUp
         
-        if event.modifierFlags.contains(.option) || event.type == .rightMouseUp {
+        if isOption || isRight {
             showSettingsMenu()
         } else {
             togglePanel()
@@ -200,7 +195,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Floating Panel (no arrow)
     
     private func setupPanel() {
-        let hostingView = NSHostingView(rootView: PopoverView())
+        let hostingView = NSHostingView(rootView: PopoverView(panel: panelState) { [weak self] in
+            self?.showSettingsMenu()
+        })
         
         // Let the hosting view size itself from SwiftUI content
         let fittingSize = hostingView.fittingSize
@@ -257,14 +254,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         panel.orderFrontRegardless()
+        panelState.isVisible = true
         
         // Monitor clicks outside to dismiss
         startClickMonitoring()
+        startModifierSampling()
     }
     
     private func hidePanel() {
         panelWindow?.orderOut(nil)
+        panelState.isVisible = false
         stopClickMonitoring()
+        stopModifierSampling()
+    }
+    
+    /// The panel never becomes key, so ⌥ is sampled while it's visible rather than observed.
+    private func startModifierSampling() {
+        stopModifierSampling()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let pressed = NSEvent.modifierFlags.contains(.option)
+                if pressed != self.panelState.isOptionPressed {
+                    self.panelState.isOptionPressed = pressed
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        modifierTimer = timer
+    }
+    
+    private func stopModifierSampling() {
+        modifierTimer?.invalidate()
+        modifierTimer = nil
+        panelState.isOptionPressed = false
     }
     
     private func startClickMonitoring() {
@@ -363,16 +386,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         providerMenuItem.submenu = providerMenu
         menu.addItem(providerMenuItem)
         
-        // Genius API Key
-        let apiKeyItem = NSMenuItem(
-            title: SettingsManager.shared.hasGeniusKey ? "Update Genius API Key..." : "Set Genius API Key...",
-            action: #selector(promptGeniusKey),
+        menu.addItem(.separator())
+        
+        // Bulk fetch for the current album / playlist
+        let controller = NowPlayingController.shared
+        let bulkItem = NSMenuItem(
+            title: controller.isBulkRunning ? "Stop Fetching Missing Lyrics & Artwork" : "Fetch Missing Lyrics & Artwork for Album/Playlist",
+            action: #selector(toggleBulkFetch),
             keyEquivalent: ""
         )
-        apiKeyItem.target = self
-        menu.addItem(apiKeyItem)
+        bulkItem.target = self
+        bulkItem.isEnabled = MusicObserver.shared.currentTrack != nil || controller.isBulkRunning
+        menu.addItem(bulkItem)
         
         menu.addItem(.separator())
+        
+        // Settings window
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettingsWindow), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         
         // About
         let aboutItem = NSMenuItem(title: "About", action: #selector(showAbout), keyEquivalent: "")
@@ -387,48 +419,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
         
         // Show menu
-        statusItem?.menu = menu
-        statusItem?.button?.performClick(nil)
-        DispatchQueue.main.async { [weak self] in
-            self?.statusItem?.menu = nil
+        if let button = statusItem?.button {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
         }
     }
     
     @objc private func toggleAutoFetchLyrics() {
         SettingsManager.shared.settings.autoFetchLyrics.toggle()
-        SettingsManager.shared.save()
     }
     
     @objc private func toggleAutoFetchArtwork() {
         SettingsManager.shared.settings.autoFetchArtwork.toggle()
-        SettingsManager.shared.save()
     }
     
     @objc private func toggleAutoWriteLyrics() {
         SettingsManager.shared.settings.autoWriteLyrics.toggle()
-        SettingsManager.shared.save()
     }
     
     @objc private func toggleAutoWriteArtwork() {
         SettingsManager.shared.settings.autoWriteArtwork.toggle()
-        SettingsManager.shared.save()
     }
     
     @objc private func selectLyricsProvider(_ sender: NSMenuItem) {
         guard let option = sender.representedObject as? LyricsProviderOption else { return }
         SettingsManager.shared.settings.lyricsProvider = option
-        SettingsManager.shared.save()
     }
     
-    @objc private func promptGeniusKey() {
-        showGeniusKeySetup()
+    @objc private func toggleBulkFetch() {
+        let controller = NowPlayingController.shared
+        if controller.isBulkRunning {
+            controller.cancelBulkFetch()
+        } else {
+            controller.startBulkFetch()
+        }
+    }
+    
+    // MARK: - Settings Window
+    
+    @objc private func showSettingsWindow() {
+        hidePanel()
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
+            window.title = "Starmania Settings"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
     
     @objc private func showAbout() {
         var shouldShow = true
         while shouldShow {
             let alert = NSAlert()
-            alert.messageText = "Starmania (1.0)"
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+            alert.messageText = "Starmania (\(version))"
             alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon\n\nLyrics databases: SongLyrics, LRCLIB / Lyrica, Genius."
             alert.alertStyle = .informational
             alert.addButton(withTitle: "OK")
@@ -451,49 +498,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc private func quitApp() {
-        MusicObserver.shared.stopPolling()
         NSApplication.shared.terminate(nil)
-    }
-    
-    // MARK: - Genius Key Setup
-    
-    private func showGeniusKeySetup() {
-        let alert = NSAlert()
-        alert.messageText = "Genius API Key Required"
-        alert.informativeText = """
-        To fetch lyrics, you need a free Genius API key.
-        
-        1. Go to https://genius.com/api-clients
-        2. Create a new API client (any name/URL)
-        3. Copy the "Client Access Token"
-        4. Paste it below
-        """
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Open Genius Website")
-        
-        let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        inputField.placeholderString = "Paste your Client Access Token here"
-        inputField.stringValue = SettingsManager.shared.settings.geniusAPIKey
-        alert.accessoryView = inputField
-        
-        let response = alert.runModal()
-        
-        switch response {
-        case .alertFirstButtonReturn:
-            let key = inputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty {
-                SettingsManager.shared.settings.geniusAPIKey = key
-                SettingsManager.shared.save()
-            }
-        case .alertThirdButtonReturn:
-            NSWorkspace.shared.open(URL(string: "https://genius.com/api-clients")!)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.showGeniusKeySetup()
-            }
-        default:
-            break
-        }
     }
 }

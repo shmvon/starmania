@@ -6,8 +6,10 @@ class LrclibFetcher: @unchecked Sendable {
 
     private init() {}
 
+    private let userAgent = "Starmania/2.0 (macOS menu bar player)"
+
     func fetchLyrics(title: String, artist: String, album: String? = nil, lyricaBaseURL: String = "") async throws -> LyricsResult {
-        let cleanTitle = stripBrackets(title)
+        let cleanTitle = TextMatching.stripBrackets(title)
         let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Attempt Lyrica server if configured
@@ -32,9 +34,7 @@ class LrclibFetcher: @unchecked Sendable {
         var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if base.hasSuffix("/") { base.removeLast() }
 
-        let queryArtist = artist.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let querySong = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        guard let url = URL(string: "\(base)/lyrics/?artist=\(queryArtist)&song=\(querySong)") else {
+        guard let url = TextMatching.url("\(base)/lyrics/", query: [("artist", artist), ("song", title)]) else {
             throw LrclibError.invalidURL("\(base)/lyrics/")
         }
 
@@ -50,21 +50,15 @@ class LrclibFetcher: @unchecked Sendable {
             throw LrclibError.parseError("Invalid Lyrica JSON")
         }
 
-        let lyricsText = (json["lyrics"] as? String) ?? (json["plainLyrics"] as? String) ?? ""
-        guard !lyricsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let lyricsText = ((json["lyrics"] as? String) ?? (json["plainLyrics"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !lyricsText.isEmpty else {
             throw LrclibError.noResults("No lyrics in Lyrica response")
         }
 
-        let formatted = """
-        \(artist) - \(title)
-
-        \(lyricsText.trimmingCharacters(in: .whitespacesAndNewlines))
-
-        Lyrics: \(url.absoluteString)
-        """
-
         return LyricsResult(
-            lyrics: formatted,
+            lyrics: lyricsText,
+            syncedLyrics: nonEmpty(json["syncedLyrics"] as? String),
             sourceURL: url.absoluteString,
             songTitle: title,
             artistName: artist,
@@ -75,41 +69,38 @@ class LrclibFetcher: @unchecked Sendable {
     // MARK: - LRCLIB API
 
     private func fetchFromLrclibGet(title: String, artist: String, album: String?) async throws -> LyricsResult {
-        var comps = URLComponents(string: "https://lrclib.net/api/get")!
-        var queryItems = [
-            URLQueryItem(name: "artist_name", value: artist),
-            URLQueryItem(name: "track_name", value: title)
-        ]
+        var query = [("artist_name", artist), ("track_name", title)]
         if let album = album, !album.isEmpty {
-            queryItems.append(URLQueryItem(name: "album_name", value: album))
+            query.append(("album_name", album))
         }
-        comps.queryItems = queryItems
 
-        guard let url = comps.url else { throw LrclibError.invalidURL("lrclib get") }
+        guard let url = TextMatching.url("https://lrclib.net/api/get", query: query) else {
+            throw LrclibError.invalidURL("lrclib get")
+        }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        request.setValue("Starmania/2.0 (macOS menu bar player)", forHTTPHeaderField: "User-Agent")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw LrclibError.noResults("Track not found on LRCLIB")
         }
 
-        return try parseLrclibJSON(data, originalTitle: title, originalArtist: artist)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LrclibError.parseError("Invalid JSON from LRCLIB")
+        }
+        return try makeResult(from: json, originalTitle: title, originalArtist: artist)
     }
 
     private func fetchFromLrclibSearch(title: String, artist: String) async throws -> LyricsResult {
-        var comps = URLComponents(string: "https://lrclib.net/api/search")!
-        comps.queryItems = [
-            URLQueryItem(name: "q", value: "\(artist) \(title)")
-        ]
-
-        guard let url = comps.url else { throw LrclibError.invalidURL("lrclib search") }
+        guard let url = TextMatching.url("https://lrclib.net/api/search", query: [("track_name", title), ("artist_name", artist)]) else {
+            throw LrclibError.invalidURL("lrclib search")
+        }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        request.setValue("Starmania/2.0 (macOS menu bar player)", forHTTPHeaderField: "User-Agent")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
@@ -120,45 +111,35 @@ class LrclibFetcher: @unchecked Sendable {
             throw LrclibError.noResults("No matching search hits on LRCLIB")
         }
 
-        for item in list {
-            if let plain = item["plainLyrics"] as? String, !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let songName = (item["trackName"] as? String) ?? title
-                let artistName = (item["artistName"] as? String) ?? artist
-                let formatted = """
-                \(artistName) - \(songName)
+        // Only accept hits whose artist and title actually match, best match first
+        let scored: [(item: [String: Any], score: Double)] = list.compactMap { item in
+            let hitArtist = (item["artistName"] as? String) ?? ""
+            let hitTitle = TextMatching.stripBrackets((item["trackName"] as? String) ?? "")
+            let artistScore = TextMatching.wordOverlapScore(artist, hitArtist)
+            let titleScore = TextMatching.wordOverlapScore(title, hitTitle)
+            guard artistScore >= 0.5, titleScore >= 0.5 else { return nil }
+            return (item, artistScore * 0.45 + titleScore * 0.55)
+        }
 
-                \(plain.trimmingCharacters(in: .whitespacesAndNewlines))
-
-                Lyrics: https://lrclib.net
-                """
-                return LyricsResult(
-                    lyrics: formatted,
-                    sourceURL: "https://lrclib.net",
-                    songTitle: songName,
-                    artistName: artistName,
-                    provider: .lrclib
-                )
+        for candidate in scored.sorted(by: { $0.score > $1.score }) {
+            if let result = try? makeResult(from: candidate.item, originalTitle: title, originalArtist: artist) {
+                return result
             }
         }
 
-        throw LrclibError.noResults("No plain lyrics available in LRCLIB search items")
+        throw LrclibError.noResults("No matching lyrics in LRCLIB search results")
     }
 
-    private func parseLrclibJSON(_ data: Data, originalTitle: String, originalArtist: String) throws -> LyricsResult {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw LrclibError.parseError("Invalid JSON from LRCLIB")
-        }
-
+    private func makeResult(from json: [String: Any], originalTitle: String, originalArtist: String) throws -> LyricsResult {
         if let instrumental = json["instrumental"] as? Bool, instrumental {
             throw LrclibError.noResults("Track is instrumental")
         }
 
+        let synced = nonEmpty(json["syncedLyrics"] as? String)
         var lyricsText = (json["plainLyrics"] as? String) ?? ""
-        if lyricsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // If plain lyrics is empty, check synced lyrics and strip timestamps
-            if let synced = json["syncedLyrics"] as? String, !synced.isEmpty {
-                lyricsText = synced.replacingOccurrences(of: "\\[\\d+:\\d+\\.\\d+\\]\\s*", with: "", options: .regularExpression)
-            }
+        if lyricsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let synced {
+            // If plain lyrics is empty, derive them from the synced lyrics
+            lyricsText = LRCParser.parse(synced).map(\.text).joined(separator: "\n")
         }
 
         lyricsText = lyricsText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -168,31 +149,21 @@ class LrclibFetcher: @unchecked Sendable {
 
         let songName = (json["trackName"] as? String) ?? originalTitle
         let artistName = (json["artistName"] as? String) ?? originalArtist
-
-        let formatted = """
-        \(artistName) - \(songName)
-
-        \(lyricsText)
-
-        Lyrics: https://lrclib.net
-        """
+        let sourceURL = (json["id"] as? Int).map { "https://lrclib.net/api/get/\($0)" } ?? "https://lrclib.net"
 
         return LyricsResult(
-            lyrics: formatted,
-            sourceURL: "https://lrclib.net",
+            lyrics: lyricsText,
+            syncedLyrics: synced,
+            sourceURL: sourceURL,
             songTitle: songName,
             artistName: artistName,
             provider: .lrclib
         )
     }
 
-    private func stripBrackets(_ text: String) -> String {
-        let stripped = text.replacingOccurrences(
-            of: "[\\(\\[].*?[\\)\\]]",
-            with: "",
-            options: .regularExpression
-        )
-        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func nonEmpty(_ text: String?) -> String? {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
     }
 }
 
@@ -213,4 +184,3 @@ enum LrclibError: LocalizedError {
         }
     }
 }
-

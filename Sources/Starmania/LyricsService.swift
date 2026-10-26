@@ -2,7 +2,7 @@ import Foundation
 
 /// Coordinates multi-provider lyrics retrieval:
 /// 1. Embedded tags (handled in PopoverView / MusicObserver)
-/// 2. Configurable providers: Genius, SongLyrics.com, Lyrica / LRCLIB
+/// 2. Configurable providers: LRCLIB / Lyrica, SongLyrics.com, Genius
 class LyricsService: @unchecked Sendable {
     static let shared = LyricsService()
 
@@ -42,35 +42,12 @@ class LyricsService: @unchecked Sendable {
             )
         }
 
-        // Determine execution order based on user preference
-        var providers: [(name: String, action: () async throws -> LyricsResult)] = []
-
-        switch preferredProvider {
-        case .genius:
-            providers = [
-                ("Genius", fetchGenius),
-                ("SongLyrics", fetchSongLyrics),
-                ("LRCLIB", fetchLrclib)
-            ]
-        case .songLyrics:
-            providers = [
-                ("SongLyrics", fetchSongLyrics),
-                ("LRCLIB", fetchLrclib),
-                ("Genius", fetchGenius)
-            ]
-        case .lrclib:
-            providers = [
-                ("LRCLIB", fetchLrclib),
-                ("SongLyrics", fetchSongLyrics),
-                ("Genius", fetchGenius)
-            ]
-        case .auto:
-            providers = [
-                ("SongLyrics", fetchSongLyrics),
-                ("LRCLIB", fetchLrclib),
-                ("Genius", fetchGenius)
-            ]
-        }
+        let actions: [LyricsProvider: () async throws -> LyricsResult] = [
+            .genius: fetchGenius,
+            .songLyrics: fetchSongLyrics,
+            .lrclib: fetchLrclib
+        ]
+        let providers = Self.providerOrder(for: preferredProvider).map { (name: $0.displayName, action: actions[$0]!) }
 
         for provider in providers {
             do {
@@ -81,6 +58,16 @@ class LyricsService: @unchecked Sendable {
         }
 
         throw LyricsServiceError.allProvidersFailed(errors.joined(separator: "; "))
+    }
+
+    /// Order in which providers are tried. The preferred one goes first; "Auto" starts with
+    /// LRCLIB because its API returns matched metadata (and synced lyrics), then the scrapers.
+    static func providerOrder(for preference: LyricsProviderOption) -> [LyricsProvider] {
+        switch preference {
+        case .genius: return [.genius, .lrclib, .songLyrics]
+        case .songLyrics: return [.songLyrics, .lrclib, .genius]
+        case .lrclib, .auto: return [.lrclib, .songLyrics, .genius]
+        }
     }
 }
 
