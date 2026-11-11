@@ -3,7 +3,12 @@ import Combine
 
 /// A change Starmania proposes for the track or album that's playing.
 struct Suggestion: Identifiable {
-    enum Kind: String { case syncedLyrics, albumStar, year, genre }
+    enum Kind: String {
+        case lyrics, artwork, syncedLyrics, albumStar, year, genre
+
+        /// Album suggestions stay while songs of the same album play; the others are per song.
+        var isAlbumLevel: Bool { self == .albumStar || self == .year || self == .genre }
+    }
 
     /// Stable across launches (kind + track or album + proposed value), so a dismissal sticks.
     let id: String
@@ -107,6 +112,8 @@ final class SuggestionCenter: ObservableObject {
     private func mode(for kind: Suggestion.Kind) -> CheckMode {
         let s = settings.settings
         switch kind {
+        case .lyrics: return s.missingLyrics
+        case .artwork: return s.missingArtwork
         case .syncedLyrics: return s.syncedLyricsUpgrade
         case .albumStar: return s.albumStarMode
         case .year: return s.yearCheck
@@ -125,7 +132,7 @@ final class SuggestionCenter: ObservableObject {
     private func albumChanged(_ track: TrackInfo?) {
         lookupTask?.cancel()
         statsTask?.cancel()
-        suggestions.removeAll { $0.kind != .syncedLyrics }
+        suggestions.removeAll { $0.kind.isAlbumLevel }
         albumFacts = nil
         albumStats = nil
         albumLookupError = nil

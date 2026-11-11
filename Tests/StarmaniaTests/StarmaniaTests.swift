@@ -193,9 +193,11 @@ private let RS = "\u{1E}"
 @Test func settingsDecodeOldConfigWithDefaults() throws {
     let json = #"{"geniusAPIKey":"k","autoFetchLyrics":true,"autoFetchArtwork":false,"autoWriteLyrics":false,"autoWriteArtwork":true}"#
     let settings = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
-    #expect(settings.autoFetchLyrics && settings.autoWriteArtwork)
+    // 2.x auto-write on → Automate; off → Propose
+    #expect(settings.missingLyrics == .propose && settings.missingArtwork == .automate)
     #expect(settings.lyricsProvider == .auto)
     #expect(settings.ratingHotkeysEnabled)
+    #expect(settings.panelHotkey == nil)
 }
 
 @MainActor
@@ -219,8 +221,9 @@ func appleScriptsCompile() throws {
         "track": MusicObserver.trackScript("ABCDEF0123456789", "set rating of t to 60"),
         "lyrics": MusicObserver.trackScript("ABCDEF0123456789", "set lyrics of t to \"\(MusicObserver.escapeForAppleScript("a \"quoted\" \\ line\nnext"))\""),
         "albumStats": MusicObserver.albumStatsScript("ABCDEF0123456789"),
-        "albumYear": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.albumTracksBody("set year of x to 2005")),
-        "albumGenre": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.albumTracksBody("set genre of x to \"Indie Rock\"")),
+        "albumYear": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.albumTracksBody(property: "year", value: "2005", skipping: ["0123", "4567"])),
+        "albumGenre": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.albumTracksBody(property: "genre", value: "\"Indie Rock\"", skipping: [])),
+        "pendingEdit": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.PendingEdit(year: 2005, genre: "Rock \"n\" Roll").scriptBody),
         "albumStar": MusicObserver.trackScript("ABCDEF0123456789", "set album favorited of t to true"),
         "albumRating": MusicObserver.trackScript("ABCDEF0123456789", "set album rating of t to 80"),
     ]
@@ -374,4 +377,44 @@ private let adamGreenLRC = """
     #expect(settings.albumStarThreshold == 6 && settings.albumStarCriterion == .favorited)
     #expect(settings.yearCheck == .propose && settings.genreCheck == .propose)
     #expect(settings.panelPage == .cover && settings.preferSyncedLyrics)
+}
+
+// MARK: - 3.0.1
+
+@Test func albumEditsSkipPlayingAndNextTracksAndUnchangedValues() {
+    let body = MusicObserver.albumTracksBody(property: "year", value: "2005", skipping: ["AB12\" & x", "CD34"])
+    #expect(body.contains("set skipList to {\"AB12\", \"CD34\"}"))  // Only hex survives
+    #expect(body.contains("if year of x is not 2005 then"))
+    #expect(MusicObserver.parseSkipped("ok" + US + "AB12" + RS + "CD34") == ["AB12", "CD34"])
+    #expect(MusicObserver.parseSkipped("ok" + US) == [])
+    #expect(MusicObserver.parseSkipped("") == [])
+}
+
+@Test func pollOutputCarriesTheNextTrack() throws {
+    let output = ["playing", "ABC", "Song", "Artist", "Album", "false", "false", "60", "/a.m4a", "1", "200",
+                  "AA", "2008", "Rock", "false", "0", "computed", "DEF", "/b.m4a"].joined(separator: US)
+    let track = try #require(MusicObserver.parsePollOutput(output))
+    #expect(track.nextPersistentID == "DEF" && track.nextFilePath == "/b.m4a")
+}
+
+@Test func pendingEditScript() {
+    let edit = MusicObserver.PendingEdit(year: 2005, genre: "Say \"Hi\"")
+    #expect(edit.scriptBody.contains("set year of t to 2005"))
+    #expect(edit.scriptBody.contains("set genre of t to \"Say \\\"Hi\\\"\""))
+    #expect(MusicObserver.PendingEdit(year: nil, genre: nil).scriptBody.isEmpty)
+}
+
+@Test func shortcutNames() {
+    #expect(HotkeyManager.displayString(modifiers: [.control, .option], key: "S") == "⌃⌥S")
+    #expect(HotkeyManager.displayString(modifiers: [.command, .shift], key: "L") == "⇧⌘L")
+    #expect(HotkeyManager.keyName(keyCode: 49, characters: " ") == "Space")
+    #expect(HotkeyManager.keyName(keyCode: 1, characters: "s") == "S")
+    #expect(HotkeyManager.carbonModifiers([.control, .option]) == UInt32(0x1000 | 0x0800))
+}
+
+@Test func panelHotkeyRoundTrips() throws {
+    var settings = AppSettings.default
+    settings.panelHotkey = KeyCombo(keyCode: 1, modifiers: 0x1800, display: "⌃⌥S")
+    let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+    #expect(decoded == settings)
 }

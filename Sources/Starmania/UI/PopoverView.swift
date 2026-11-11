@@ -14,20 +14,18 @@ enum PanelMetrics {
     /// Every page has the same height: the cover is square at full width.
     static let pageHeight: CGFloat = width - 2 * padding
     static let lyricsFontSize: CGFloat = 12.5
-    static let actionRowHeight: CGFloat = 22
 }
 
 // MARK: - Main Popover View
 
-/// Song ratings on top, then one page at a time: Cover, Lyrics, or Album (album rating,
-/// year, genre, lookups and the album/playlist track list).
+/// Song title, then one page at a time: Cover, Lyrics, or Album (album rating, year, genre,
+/// lookups and the album/playlist track list), the page tabs, and the song ratings at the bottom.
 struct PopoverView: View {
     @ObservedObject private var music = MusicObserver.shared
     @ObservedObject private var controller = NowPlayingController.shared
     @ObservedObject private var checks = SuggestionCenter.shared
     @ObservedObject private var settings = SettingsManager.shared
     @ObservedObject var panel: PanelState
-    let onShowSettingsMenu: () -> Void
 
     @State private var showPlaybackControls = false
     /// Per-track override of the "prefer synced lyrics" setting; reset on track change.
@@ -82,11 +80,8 @@ struct PopoverView: View {
     @ViewBuilder
     private func trackView(_ track: TrackInfo) -> some View {
         VStack(spacing: 6) {
-            ratingBar(track)
-                .padding(.top, pad)
-                .padding(.horizontal, pad)
-
             trackInfo(track)
+                .padding(.top, pad)
                 .padding(.horizontal, pad)
 
             if !checks.suggestions.isEmpty {
@@ -100,25 +95,20 @@ struct PopoverView: View {
             Group {
                 switch page {
                 case .cover: artworkView(track)
-                case .lyrics: lyricsPage()
+                case .lyrics: lyricsPage(track)
                 case .album: albumPage(track)
                 }
             }
-            // The Album page has no action row; it takes that space so switching pages doesn't resize the panel
-            .frame(width: width - 2 * pad, height: page == .album ? pageHeight + PanelMetrics.actionRowHeight + 6 : pageHeight)
-
-            if page != .album {
-                actionRow(track)
-                    .frame(height: PanelMetrics.actionRowHeight)
-                    .padding(.horizontal, pad)
-            }
-
-            statusLine()
-                .padding(.horizontal, pad)
+            .frame(width: width - 2 * pad, height: pageHeight)
+            .overlay(alignment: .bottom) { statusBadge() }
 
             tabBar(track)
                 .padding(.horizontal, pad)
-                .padding(.bottom, 8)
+
+            ratingBar(track)
+                .padding(.horizontal, pad)
+                .padding(.top, 2)
+                .padding(.bottom, pad)
         }
         .animation(.default, value: checks.suggestions.map(\.id))
     }
@@ -222,6 +212,8 @@ struct PopoverView: View {
 
     private func icon(for kind: Suggestion.Kind) -> String {
         switch kind {
+        case .lyrics: return "quote.bubble"
+        case .artwork: return "photo"
         case .syncedLyrics: return "waveform"
         case .albumStar: return "star.circle"
         case .year: return "calendar"
@@ -281,6 +273,37 @@ struct PopoverView: View {
                 showPlaybackControls = hovering
             }
         }
+        .onDrag { artworkDragItem(track) }
+        .contextMenu { artworkMenu(track) }
+    }
+
+    @ViewBuilder
+    private func artworkMenu(_ track: TrackInfo) -> some View {
+        Button("Copy Artwork", action: controller.copyArtwork)
+            .disabled(track.artworkData == nil)
+        Button("Fetch Artwork", action: controller.fetchArtwork)
+            .disabled(controller.artworkLoading)
+        if track.isLocal {
+            Button("Save Artwork to File", action: controller.writeArtworkToFile)
+                .disabled(track.artworkData == nil || !controller.artworkUnsaved)
+            Divider()
+            Button("Delete Artwork", role: .destructive, action: controller.deleteArtwork)
+                .disabled(track.artworkData == nil)
+        }
+    }
+
+    /// Dragging the cover gives a PNG file named after the album (to Finder, Mail, editors, …).
+    private func artworkDragItem(_ track: TrackInfo) -> NSItemProvider {
+        guard let data = track.artworkData, let image = NSImage(data: data) else { return NSItemProvider() }
+        let name = "\(track.artist) - \(track.album)".replacingOccurrences(of: "[/:\\\\]", with: "_", options: .regularExpression)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).png")
+        if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]), (try? png.write(to: url)) != nil,
+           let provider = NSItemProvider(contentsOf: url) {
+            provider.suggestedName = name
+            return provider
+        }
+        return NSItemProvider(object: image)
     }
 
     // MARK: - Lyrics Page
@@ -288,7 +311,7 @@ struct PopoverView: View {
     private var hasSyncedLyrics: Bool { !controller.syncedLines.isEmpty }
     private var showSynced: Bool { hasSyncedLyrics && (syncedOverride ?? settings.settings.preferSyncedLyrics) }
 
-    private func lyricsPage() -> some View {
+    private func lyricsPage(_ track: TrackInfo) -> some View {
         VStack(spacing: 4) {
             HStack(spacing: 6) {
                 Text(lyricsHeaderTitle)
@@ -333,6 +356,25 @@ struct PopoverView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .contentShape(Rectangle())
+        .contextMenu { lyricsMenu(track) }
+    }
+
+    @ViewBuilder
+    private func lyricsMenu(_ track: TrackInfo) -> some View {
+        let hasLyrics = !controller.lyrics.isEmpty
+        Button("Copy Lyrics") { controller.copyLyrics() }
+            .disabled(!hasLyrics)
+        if controller.syncedLyricsText != nil {
+            Button("Copy Lyrics with Timing") { controller.copyLyrics(withTiming: true) }
+        }
+        Button(hasLyrics ? "Fetch Lyrics Again" : "Fetch Lyrics", action: controller.fetchLyrics)
+            .disabled(controller.lyricsLoading)
+        Button(track.isLocal ? "Save Lyrics to File" : "Save Lyrics in Music", action: controller.writeLyricsToFile)
+            .disabled(!controller.lyricsUnsaved)
+        Divider()
+        Button("Delete Lyrics", role: .destructive, action: controller.deleteLyrics)
+            .disabled(controller.lyricsSource != .embedded)
     }
 
     private var lyricsHeaderTitle: String {
@@ -392,7 +434,6 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 6) {
             albumHeader(track)
             albumFacts(track)
-            Divider()
             playlistSection()
         }
     }
@@ -405,7 +446,7 @@ struct PopoverView: View {
                     .foregroundStyle(track.albumFavorited ? .yellow : .secondary)
             }
             .buttonStyle(.plain)
-            .help(track.albumFavorited ? "Unstar album" : "Star album")
+            .help(albumStarHelp(track))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(track.album.isEmpty ? "No album" : track.album)
@@ -428,77 +469,57 @@ struct PopoverView: View {
         }
     }
 
+    /// One line: year (with the file tag's and MusicBrainz's if they differ), then the genre and the
+    /// other MusicBrainz genres to pick from, scrolling sideways, then the lookup button.
     private func albumFacts(_ track: TrackInfo) -> some View {
         let facts = checks.albumFacts
-        return VStack(alignment: .leading, spacing: 4) {
-            // Year: Music, the file tag (if different) and MusicBrainz
-            HStack(spacing: 6) {
-                factLabel("Year")
-                Text(track.year > 0 ? "\(track.year)" : "—")
-                    .font(.system(size: 11, weight: .medium))
-                if let tagYear = track.fileTags?.year, tagYear != track.year {
-                    Text("tag \(tagYear)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.orange)
-                        .help("The file's tag says \(tagYear)")
-                }
-                if let year = facts?.year {
-                    if year == track.year {
-                        Image(systemName: "checkmark.circle.fill")
+        let others = (facts?.genres ?? []).prefix(6)
+            .map(GenreMatching.displayName)
+            .filter { TextMatching.normalizeForMatching($0) != TextMatching.normalizeForMatching(track.genre) }
+        return HStack(spacing: 5) {
+            Text(track.year > 0 ? "\(track.year)" : "—")
+                .font(.system(size: 11, weight: .medium))
+                .help("Year")
+            if let tagYear = track.fileTags?.year, tagYear != track.year {
+                Text("tag \(tagYear)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .help("The file's tag says \(tagYear)")
+            }
+            if let year = facts?.year, year != track.year {
+                chip("→ \(year)", selected: false) { music.setAlbumYear(year) }
+                    .help("Original release year on MusicBrainz — click to set it on the whole album")
+            }
+
+            Text("·").foregroundStyle(.tertiary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    if track.genre.isEmpty {
+                        Text("No genre")
                             .font(.system(size: 10))
-                            .foregroundStyle(.green)
-                            .help("Matches MusicBrainz")
+                            .foregroundStyle(.tertiary)
                     } else {
-                        chip("MusicBrainz: \(year)", selected: false) {
-                            music.setAlbumYear(year)
-                        }
-                        .help("Original release year on MusicBrainz — click to set it on the whole album")
+                        chip(track.genre, selected: true) {}
+                            .help("Genre")
+                    }
+                    ForEach(others, id: \.self) { name in
+                        chip(name, selected: false) { music.setAlbumGenre(name) }
+                            .help("MusicBrainz genre — click to set it on the whole album")
                     }
                 }
-                Spacer(minLength: 0)
-                lookupControl(facts)
             }
 
-            // Genre: Music's, plus MusicBrainz genres to pick from
-            HStack(spacing: 6) {
-                factLabel("Genre")
-                Text(track.genre.isEmpty ? "—" : track.genre)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                if let genres = facts?.genres, GenreMatching.agrees(track.genre, with: genres) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.green)
-                        .help("One of the top MusicBrainz genres")
-                }
-                Spacer(minLength: 0)
-            }
-            if let genres = facts?.genres, !genres.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(genres.prefix(6), id: \.self) { genre in
-                            let name = GenreMatching.displayName(genre)
-                            chip(name, selected: TextMatching.normalizeForMatching(name) == TextMatching.normalizeForMatching(track.genre)) {
-                                music.setAlbumGenre(name)
-                            }
-                            .help("Set the genre of the whole album to \(name)")
-                        }
-                    }
-                }
-            } else if let error = checks.albumLookupError {
-                Text(error)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-
-            if let stats = checks.albumStats, stats.trackCount > 0 {
-                let s = settings.settings
-                let count = stats.qualifying(s.albumStarCriterion, minRating: s.albumStarMinRating)
-                Text(albumStarCaption(count: count, total: stats.trackCount))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
+            lookupControl(facts)
         }
+    }
+
+    private func albumStarHelp(_ track: TrackInfo) -> String {
+        let action = track.albumFavorited ? "Click to unstar the album" : "Click to star the album"
+        guard let stats = checks.albumStats, stats.trackCount > 0 else { return action }
+        let s = settings.settings
+        let count = stats.qualifying(s.albumStarCriterion, minRating: s.albumStarMinRating)
+        return "\(albumStarCaption(count: count, total: stats.trackCount))\n\(action)"
     }
 
     private func albumStarCaption(count: Int, total: Int) -> String {
@@ -527,19 +548,13 @@ struct PopoverView: View {
             .help("Open on MusicBrainz")
         } else {
             Button(action: { checks.lookUpCurrentAlbum() }) {
-                Label("Look up", systemImage: "magnifyingglass")
-                    .font(.system(size: 10))
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
-            .help("Look up year and genre on MusicBrainz")
+            .help(checks.albumLookupError ?? "Look up year and genre on MusicBrainz")
         }
-    }
-
-    private func factLabel(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 9, weight: .medium))
-            .foregroundStyle(.tertiary)
-            .frame(width: 38, alignment: .leading)
     }
 
     private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -557,10 +572,6 @@ struct PopoverView: View {
 
     private func playlistSection() -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(playlistIsAlbum ? "ALBUM TRACKS" : "PLAYLIST")
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.tertiary)
-
             if playlistLoading && playlistTracks.isEmpty {
                 ProgressView()
                     .controlSize(.small)
@@ -674,131 +685,78 @@ struct PopoverView: View {
         )
     }
 
-    // MARK: - Action Row (Cover and Lyrics pages)
-
-    @ViewBuilder
-    private func actionRow(_ track: TrackInfo) -> some View {
-        let option = panel.isOptionPressed
-        HStack(spacing: 4) {
-            if page == .cover {
-                actionButton("Fetch", icon: "photo.badge.arrow.down", disabled: controller.artworkLoading,
-                             help: "Fetch artwork from the iTunes Store", action: controller.fetchArtwork)
-                if track.isLocal {
-                    actionButton(option ? "Delete" : "Write", icon: option ? "trash" : "tag", destructive: option,
-                                 disabled: track.artworkData == nil && !option,
-                                 help: "Write the artwork into the file's tag (hold ⌥ to delete it)") {
-                        if option { controller.deleteArtwork() } else { controller.writeArtworkToFile() }
-                    }
-                }
-                actionButton("Copy", icon: "doc.on.doc", disabled: track.artworkData == nil,
-                             help: "Copy the artwork", action: controller.copyArtwork)
-            } else {
-                let hasLyrics = !controller.lyrics.isEmpty
-                actionButton("Fetch", icon: "text.magnifyingglass", disabled: controller.lyricsLoading,
-                             help: "Fetch lyrics", action: controller.fetchLyrics)
-                actionButton(option ? "Delete" : "Write", icon: option ? "trash" : "tag", destructive: option,
-                             disabled: !hasLyrics && !option,
-                             help: track.isLocal ? "Write the lyrics into the file's tag (hold ⌥ to delete them)"
-                                                 : "Save the lyrics in Music (hold ⌥ to delete them)") {
-                    if option { controller.deleteLyrics() } else { controller.writeLyricsToFile() }
-                }
-                actionButton(option && controller.syncedLyricsText != nil ? "Copy LRC" : "Copy", icon: "doc.on.doc",
-                             disabled: !hasLyrics, help: "Copy the lyrics (hold ⌥ to copy with timestamps)") {
-                    controller.copyLyrics(withTiming: option)
-                }
-            }
-        }
-    }
-
-    private func actionButton(_ title: String, icon: String, destructive: Bool = false, disabled: Bool,
-                              help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(.system(size: 10, weight: .medium))
-                .frame(maxWidth: .infinity)
-                .foregroundStyle(destructive ? .red : .primary)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .disabled(disabled)
-        .help(help)
-    }
-
     // MARK: - Status and Tabs
 
+    /// Short confirmations ("Lyrics → File ✓") float over the bottom of the page.
     @ViewBuilder
-    private func statusLine() -> some View {
+    private func statusBadge() -> some View {
         Group {
             if let progress = controller.bulkProgress {
                 HStack(spacing: 4) {
                     ProgressView().controlSize(.mini)
-                    Text(progress)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    Text(progress).lineLimit(1)
                     Button("Stop") { controller.cancelBulkFetch() }
                         .buttonStyle(.borderless)
                 }
             } else if let msg = controller.statusMessage {
                 Text(msg)
-                    .foregroundStyle(controller.statusIsError ? .red : .green)
+                    .foregroundStyle(controller.statusIsError ? .red : .primary)
                     .lineLimit(1)
-                    .transition(.opacity)
-            } else {
-                Text(" ")
             }
         }
-        .font(.system(size: 10))
-        .frame(height: 14)
+        .font(.system(size: 10, weight: .medium))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(.regularMaterial))
+        .opacity(controller.bulkProgress != nil || controller.statusMessage != nil ? 1 : 0)
+        .padding(.bottom, 6)
         .animation(.default, value: controller.statusMessage)
+        .allowsHitTesting(controller.bulkProgress != nil)
     }
 
     private func tabBar(_ track: TrackInfo) -> some View {
         HStack(spacing: 6) {
+            // Plain icons like the playback controls; the current page's is filled and brighter
             HStack(spacing: 0) {
                 tabButton(.cover, icon: "photo", help: "Cover")
                 tabButton(.lyrics, icon: "quote.bubble", help: "Lyrics")
                 tabButton(.album, icon: "square.stack", help: "Album: rating, year, genre and tracks",
-                          badge: checks.suggestions.contains { $0.kind != .syncedLyrics })
+                          badge: checks.suggestions.contains { $0.kind.isAlbumLevel })
             }
-            .padding(2)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
 
-            HStack(spacing: 10) {
-                Button(action: { music.previousTrack() }) {
-                    Image(systemName: "backward.fill").font(.system(size: 10))
-                }.buttonStyle(.plain).help("Previous")
-                Button(action: { music.playPause() }) {
-                    Image(systemName: track.isPlaying ? "pause.fill" : "play.fill").font(.system(size: 12))
-                }.buttonStyle(.plain).help(track.isPlaying ? "Pause" : "Play")
-                Button(action: { music.nextTrack() }) {
-                    Image(systemName: "forward.fill").font(.system(size: 10))
-                }.buttonStyle(.plain).help("Next")
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 4)
+            Spacer(minLength: 0)
 
-            Button(action: onShowSettingsMenu) {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 0) {
+                mediaButton("backward.fill", size: 11, help: "Previous") { music.previousTrack() }
+                mediaButton(track.isPlaying ? "pause.fill" : "play.fill", size: 13, help: track.isPlaying ? "Pause" : "Play") { music.playPause() }
+                mediaButton("forward.fill", size: 11, help: "Next") { music.nextTrack() }
             }
-            .buttonStyle(.plain)
-            .help("Settings")
         }
+    }
+
+    /// The whole 28×26 pt square is clickable, not just the glyph.
+    private func mediaButton(_ icon: String, size: CGFloat, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: size))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private func tabButton(_ target: PanelPage, icon: String, help: String, badge: Bool = false) -> some View {
         let selected = page == target
         return Button(action: { settings.settings.panelPage = target }) {
-            Image(systemName: icon)
-                .font(.system(size: 11))
+            Image(systemName: selected ? icon + ".fill" : icon)
+                .font(.system(size: 12))
                 .foregroundStyle(selected ? .primary : .secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
-                .background(RoundedRectangle(cornerRadius: 5).fill(selected ? Color.primary.opacity(0.1) : Color.clear))
+                .frame(width: 32, height: 26)
                 .overlay(alignment: .topTrailing) {
                     if badge {
-                        Circle().fill(Color.accentColor).frame(width: 5, height: 5).padding(.top, 3).padding(.trailing, 8)
+                        Circle().fill(Color.accentColor).frame(width: 5, height: 5).padding(.top, 4).padding(.trailing, 6)
                     }
                 }
                 .contentShape(Rectangle())

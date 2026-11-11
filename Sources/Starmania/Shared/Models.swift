@@ -24,6 +24,8 @@ struct TrackInfo: Equatable {
     var albumRating: Int = 0     // 0-5
     var albumRatingComputed: Bool = true  // Music derives it from the track ratings
     var fileTags: MetadataWriter.FileTags?  // Read from the file itself (local tracks)
+    var nextPersistentID: String = ""      // The song after this one in the current playlist, if known
+    var nextFilePath: String?
 
     var isLocal: Bool { filePath != nil }
 
@@ -160,15 +162,23 @@ enum LyricsProviderOption: String, Codable, CaseIterable {
     }
 }
 
+/// A global keyboard shortcut (Carbon key code and modifier mask).
+struct KeyCombo: Codable, Equatable {
+    var keyCode: UInt32
+    var modifiers: UInt32
+    var display: String   // e.g. "⌃⌥S"
+}
+
 struct AppSettings: Codable, Equatable {
     var geniusAPIKey: String
-    var autoFetchLyrics: Bool
-    var autoFetchArtwork: Bool
-    var autoWriteLyrics: Bool    // Auto-write fetched lyrics to the file
-    var autoWriteArtwork: Bool   // Auto-write fetched artwork to the file if it has none
     var lyricaBaseURL: String = "" // Optional custom Lyrica server URL, e.g. http://localhost:9999
     var lyricsProvider: LyricsProviderOption = .auto
     var ratingHotkeysEnabled: Bool = true
+    var panelHotkey: KeyCombo?
+
+    // Missing lyrics and artwork: fetched for the playing track, then proposed or saved to the file
+    var missingLyrics: CheckMode = .propose
+    var missingArtwork: CheckMode = .propose
 
     // Synced lyrics
     var preferSyncedLyrics: Bool = true       // Show the highlighted view when timing is available
@@ -187,41 +197,33 @@ struct AppSettings: Codable, Equatable {
 
     var panelPage: PanelPage = .cover
 
-    init(
-        geniusAPIKey: String,
-        autoFetchLyrics: Bool,
-        autoFetchArtwork: Bool,
-        autoWriteLyrics: Bool,
-        autoWriteArtwork: Bool,
-        lyricaBaseURL: String = "",
-        lyricsProvider: LyricsProviderOption = .auto,
-        ratingHotkeysEnabled: Bool = true
-    ) {
+    init(geniusAPIKey: String) {
         self.geniusAPIKey = geniusAPIKey
-        self.autoFetchLyrics = autoFetchLyrics
-        self.autoFetchArtwork = autoFetchArtwork
-        self.autoWriteLyrics = autoWriteLyrics
-        self.autoWriteArtwork = autoWriteArtwork
-        self.lyricaBaseURL = lyricaBaseURL
-        self.lyricsProvider = lyricsProvider
-        self.ratingHotkeysEnabled = ratingHotkeysEnabled
+    }
+
+    /// Settings from 2.x used on/off toggles for fetching and writing lyrics and artwork.
+    private enum LegacyKeys: String, CodingKey {
+        case autoWriteLyrics, autoWriteArtwork
     }
 
     /// Every key is optional, so configs from older versions load with defaults for new settings.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
         let d = AppSettings.default
         func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
             (try? c.decodeIfPresent(T.self, forKey: key)) ?? fallback
         }
+        func legacyMode(_ key: LegacyKeys) -> CheckMode {
+            ((try? legacy.decodeIfPresent(Bool.self, forKey: key)) ?? false) ? .automate : .propose
+        }
         self.geniusAPIKey = value(.geniusAPIKey, "")
-        self.autoFetchLyrics = value(.autoFetchLyrics, false)
-        self.autoFetchArtwork = value(.autoFetchArtwork, false)
-        self.autoWriteLyrics = value(.autoWriteLyrics, false)
-        self.autoWriteArtwork = value(.autoWriteArtwork, false)
         self.lyricaBaseURL = value(.lyricaBaseURL, "")
         self.lyricsProvider = value(.lyricsProvider, LyricsProviderOption.auto)
         self.ratingHotkeysEnabled = value(.ratingHotkeysEnabled, true)
+        self.panelHotkey = value(.panelHotkey, nil as KeyCombo?)
+        self.missingLyrics = value(.missingLyrics, legacyMode(.autoWriteLyrics))
+        self.missingArtwork = value(.missingArtwork, legacyMode(.autoWriteArtwork))
         self.preferSyncedLyrics = value(.preferSyncedLyrics, d.preferSyncedLyrics)
         self.storeSyncedLyrics = value(.storeSyncedLyrics, d.storeSyncedLyrics)
         self.syncedLyricsUpgrade = value(.syncedLyricsUpgrade, d.syncedLyricsUpgrade)
@@ -235,12 +237,6 @@ struct AppSettings: Codable, Equatable {
     }
 
     static let `default` = AppSettings(
-        geniusAPIKey: "y79GjLg6mJjW2kzbrWqbHgc17HCjdCFr9VZvegXK2an0VC0z70AkgeIs_jWPfZf5",
-        autoFetchLyrics: false,
-        autoFetchArtwork: false,
-        autoWriteLyrics: false,
-        autoWriteArtwork: false,
-        lyricaBaseURL: "",
-        lyricsProvider: .auto
+        geniusAPIKey: "y79GjLg6mJjW2kzbrWqbHgc17HCjdCFr9VZvegXK2an0VC0z70AkgeIs_jWPfZf5"
     )
 }

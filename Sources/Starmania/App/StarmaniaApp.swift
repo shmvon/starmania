@@ -24,7 +24,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var clickMonitor: Any?
     private var modifierTimer: Timer?
-    /// Suggestions are waiting: the icon shows a dot and pulses while the panel is closed.
+    /// Suggestions are waiting: the icon pulses while the panel is closed.
     private var needsAttention = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -47,7 +47,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates()
             .sink { [weak self] pending in
                 self?.needsAttention = pending
-                self?.updateStatusIcon()
                 self?.updatePulse()
             }
             .store(in: &cancellables)
@@ -78,6 +77,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 HotkeyManager.shared.setEnabled(enabled)
             }
             .store(in: &cancellables)
+
+        // The shortcut that shows the panel
+        SettingsManager.shared.$settings
+            .map(\.panelHotkey)
+            .removeDuplicates()
+            .sink { [weak self] combo in
+                HotkeyManager.shared.setPanelHotkey(combo) { self?.togglePanel() }
+            }
+            .store(in: &cancellables)
     }
     
     /// Write any queued tag changes before quitting, so they aren't lost.
@@ -85,6 +93,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         MusicObserver.shared.stopPolling()
         Task {
             await NowPlayingController.shared.flushAllPendingWrites()
+            await MusicObserver.shared.flushPendingEdits()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -184,10 +193,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             annotWidth = max(annotWidth, bottomNS.size(withAttributes: [.font: xFont]).width)
         }
         
-        let dotSize: CGFloat = 4
-        let annotatedWidth = starBounds.width + (annotWidth > 0 ? annotWidth + 1 : 0)
-        let totalWidth = annotatedWidth + (needsAttention ? dotSize + 2 : 0)
-        let showDot = needsAttention
+        let totalWidth = starBounds.width + (annotWidth > 0 ? annotWidth + 1 : 0)
         
         let image = NSImage(size: NSSize(width: ceil(totalWidth), height: menuBarHeight), flipped: false) { _ in
             // Draw star, centered vertically but 0.5pt lower
@@ -209,12 +215,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let bottomNS = bottomStr as NSString
                 let xY: CGFloat = 1  // 1pt from bottom, aligned with star bottom edge
                 bottomNS.draw(at: NSPoint(x: annotX, y: xY), withAttributes: [.font: xFont])
-            }
-            
-            // Something waits for a decision (a suggestion in the panel)
-            if showDot {
-                NSColor.black.setFill()
-                NSBezierPath(ovalIn: NSRect(x: annotatedWidth + 2, y: (menuBarHeight - dotSize) / 2, width: dotSize, height: dotSize)).fill()
             }
             
             return true
@@ -248,10 +248,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Floating Panel (no arrow)
     
     private func setupPanel() {
-        let hostingView = NSHostingView(rootView: PopoverView(panel: panelState) { [weak self] in
-            self?.showSettingsMenu()
-        })
-        hostingView.sizingOptions = []  // The panel is resized explicitly, keeping its top edge
+        let hostingView = NSHostingView(rootView: PopoverView(panel: panelState))
+        // Report the SwiftUI content size (fittingSize), but don't let it resize the window:
+        // the panel is resized explicitly, keeping its top edge under the menu bar
+        hostingView.sizingOptions = [.intrinsicContentSize]
         
         // Let the hosting view size itself from SwiftUI content
         let fittingSize = hostingView.fittingSize
@@ -315,7 +315,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let x = screenFrame.midX - panelWidth / 2
         // Menu bar height is typically 24-25pt; position panel 2pt below the screen frame
-        let y = screenFrame.minY - panelHeight - 2
+        let y = screenFrame.minY - panelHeight - 7  // 7 pt below the status item: a small gap under the menu bar
         
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         panel.orderFrontRegardless()
@@ -391,50 +391,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showSettingsMenu() {
         let menu = NSMenu()
         
-        // Auto-fetch Lyrics
-        let autoFetchLyricsItem = NSMenuItem(
-            title: "Auto-fetch Lyrics",
-            action: #selector(toggleAutoFetchLyrics),
-            keyEquivalent: ""
-        )
-        autoFetchLyricsItem.target = self
-        autoFetchLyricsItem.state = SettingsManager.shared.settings.autoFetchLyrics ? .on : .off
-        menu.addItem(autoFetchLyricsItem)
-        
-        // Auto-fetch Artwork
-        let autoFetchArtworkItem = NSMenuItem(
-            title: "Auto-fetch Artwork",
-            action: #selector(toggleAutoFetchArtwork),
-            keyEquivalent: ""
-        )
-        autoFetchArtworkItem.target = self
-        autoFetchArtworkItem.state = SettingsManager.shared.settings.autoFetchArtwork ? .on : .off
-        menu.addItem(autoFetchArtworkItem)
-        
-        menu.addItem(.separator())
-        
-        // Auto-write Lyrics if empty
-        let autoWriteLyricsItem = NSMenuItem(
-            title: "Auto-write Lyrics to File",
-            action: #selector(toggleAutoWriteLyrics),
-            keyEquivalent: ""
-        )
-        autoWriteLyricsItem.target = self
-        autoWriteLyricsItem.state = SettingsManager.shared.settings.autoWriteLyrics ? .on : .off
-        menu.addItem(autoWriteLyricsItem)
-        
-        // Auto-write Artwork if empty
-        let autoWriteArtworkItem = NSMenuItem(
-            title: "Auto-write Artwork to File",
-            action: #selector(toggleAutoWriteArtwork),
-            keyEquivalent: ""
-        )
-        autoWriteArtworkItem.target = self
-        autoWriteArtworkItem.state = SettingsManager.shared.settings.autoWriteArtwork ? .on : .off
-        menu.addItem(autoWriteArtworkItem)
-        
-        menu.addItem(.separator())
-        
         // Bulk fetch for the current album / playlist
         let controller = NowPlayingController.shared
         let bulkItem = NSMenuItem(
@@ -469,22 +425,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
         }
-    }
-    
-    @objc private func toggleAutoFetchLyrics() {
-        SettingsManager.shared.settings.autoFetchLyrics.toggle()
-    }
-    
-    @objc private func toggleAutoFetchArtwork() {
-        SettingsManager.shared.settings.autoFetchArtwork.toggle()
-    }
-    
-    @objc private func toggleAutoWriteLyrics() {
-        SettingsManager.shared.settings.autoWriteLyrics.toggle()
-    }
-    
-    @objc private func toggleAutoWriteArtwork() {
-        SettingsManager.shared.settings.autoWriteArtwork.toggle()
     }
     
     @objc private func toggleBulkFetch() {

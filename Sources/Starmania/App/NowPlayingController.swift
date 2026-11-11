@@ -17,6 +17,10 @@ final class NowPlayingController: ObservableObject {
     @Published private(set) var lyricsLoading = false
     @Published private(set) var lyricsError: String?
     @Published private(set) var artworkLoading = false
+    /// The artwork shown was fetched and isn't in the file yet.
+    @Published private(set) var artworkUnsaved = false
+    /// The lyrics shown were fetched and aren't stored yet.
+    var lyricsUnsaved: Bool { !lyrics.isEmpty && lyricsSource != .embedded }
     @Published private(set) var statusMessage: String?
     @Published private(set) var statusIsError = false
     @Published private(set) var bulkProgress: String?
@@ -45,9 +49,15 @@ final class NowPlayingController: ObservableObject {
     // MARK: - Track Changes
 
     private func onTrackChanged(_ track: TrackInfo?) {
-        // Deferred writes for the previous track can go now that it's no longer playing
-        let currentPath = track?.filePath
-        Task { await flushPendingWrites(except: currentPath) }
+        // Deferred writes for the previous track can go now that it's no longer playing,
+        // after a pause so the file isn't rewritten during the transition (crossfade, gapless)
+        Task {
+            try? await Task.sleep(for: .seconds(MusicObserver.writeDelayAfterTrackChange))
+            await flushPendingWrites(except: protectedPaths(fallback: track))
+        }
+        artworkUnsaved = false
+        SuggestionCenter.shared.withdraw(.lyrics)
+        SuggestionCenter.shared.withdraw(.artwork)
 
         activeLyricsRequestID = UUID()
         lyricsLoading = false
@@ -67,12 +77,12 @@ final class NowPlayingController: ObservableObject {
             }
         } else {
             setLyrics(nil, source: nil)
-            if settings.settings.autoFetchLyrics {
+            if settings.settings.missingLyrics != .off {
                 startLyricsFetch(for: track)
             }
         }
 
-        if track.artworkData == nil && settings.settings.autoFetchArtwork {
+        if track.artworkData == nil && settings.settings.missingArtwork != .off {
             startArtworkFetch(for: track)
         }
     }
@@ -129,10 +139,7 @@ final class NowPlayingController: ObservableObject {
                 guard activeLyricsRequestID == requestID, isCurrent(track) else { return }
                 setLyrics(result.syncedLyrics ?? result.lyrics, source: result.provider)
                 lyricsLoading = false
-
-                if settings.settings.autoWriteLyrics && track.isLocal {
-                    await writeLyrics(textToStore(plain: result.lyrics, synced: result.syncedLyrics), to: track)
-                }
+                offerToSaveLyrics(result, for: track)
             } catch {
                 guard activeLyricsRequestID == requestID, isCurrent(track) else { return }
                 lyricsError = error.localizedDescription
@@ -141,14 +148,36 @@ final class NowPlayingController: ObservableObject {
         }
     }
 
+    /// Propose (or, in Automate mode, do) storing fetched lyrics: in the file, or in Music for streaming tracks.
+    private func offerToSaveLyrics(_ result: LyricsResult, for track: TrackInfo) {
+        if let path = track.filePath, MetadataWriter.format(of: path) == nil { return }
+        let text = textToStore(plain: result.lyrics, synced: result.syncedLyrics)
+        let timed = LRCParser.isSynced(text) ? ", with timing" : ""
+        SuggestionCenter.shared.offer(Suggestion(
+            id: "lyrics|\(track.trackKey)",
+            kind: .lyrics,
+            title: track.isLocal ? "Save lyrics to the file" : "Save lyrics in Music",
+            detail: "Found on \(result.provider.displayName)\(timed)",
+            applyTitle: "Save",
+            apply: { NowPlayingController.shared.saveLyrics(text, to: track) }
+        ))
+    }
+
+    private func saveLyrics(_ text: String, to track: TrackInfo) {
+        if isCurrent(track) { lyricsSource = .embedded }
+        Task { await writeLyrics(text, to: track) }
+    }
+
     func writeLyricsToFile() {
         guard let track = music.currentTrack, !lyrics.isEmpty else { return }
         let text = textToStore(plain: lyrics, synced: syncedLyricsText)
-        Task { await writeLyrics(text, to: track) }
+        SuggestionCenter.shared.withdraw(.lyrics)
+        saveLyrics(text, to: track)
     }
 
     func deleteLyrics() {
         guard let track = music.currentTrack else { return }
+        SuggestionCenter.shared.withdraw(.lyrics)
         setLyrics(nil, source: nil)
         Task { await writeLyrics("", to: track) }
     }
@@ -222,7 +251,6 @@ final class NowPlayingController: ObservableObject {
 
     private func startArtworkFetch(for track: TrackInfo) {
         artworkLoading = true
-        showStatus("Fetching artwork...")
 
         Task {
             defer { artworkLoading = false }
@@ -230,12 +258,18 @@ final class NowPlayingController: ObservableObject {
                 let data = try await ArtworkFetcher.shared.fetchArtwork(artist: track.artist, album: track.album)
                 guard isCurrent(track) else { return }
                 music.updateArtwork(data)
-                showStatus("Artwork fetched ✓")
+                artworkUnsaved = true
 
-                if settings.settings.autoWriteArtwork, let path = track.filePath,
-                   MetadataWriter.format(of: path) != nil,
-                   await !MetadataWriter.shared.checkExistingMetadata(filePath: path).hasArtwork {
-                    await writeArtwork(data, to: track)
+                if let path = track.filePath, MetadataWriter.format(of: path) != nil,
+                   await !MetadataWriter.shared.checkExistingMetadata(filePath: path).hasArtwork, isCurrent(track) {
+                    SuggestionCenter.shared.offer(Suggestion(
+                        id: "artwork|\(track.trackKey)",
+                        kind: .artwork,
+                        title: "Save artwork to the file",
+                        detail: "Found on the iTunes Store",
+                        applyTitle: "Save",
+                        apply: { NowPlayingController.shared.saveArtwork(data, to: track) }
+                    ))
                 }
             } catch {
                 guard isCurrent(track) else { return }
@@ -246,11 +280,19 @@ final class NowPlayingController: ObservableObject {
 
     func writeArtworkToFile() {
         guard let track = music.currentTrack, let data = track.artworkData else { return }
+        SuggestionCenter.shared.withdraw(.artwork)
+        saveArtwork(data, to: track)
+    }
+
+    private func saveArtwork(_ data: Data, to track: TrackInfo) {
+        if isCurrent(track) { artworkUnsaved = false }
         Task { await writeArtwork(data, to: track) }
     }
 
     func deleteArtwork() {
         guard let track = music.currentTrack else { return }
+        artworkUnsaved = false
+        SuggestionCenter.shared.withdraw(.artwork)
         music.deleteArtwork()
         guard track.filePath != nil else {
             showStatus("Artwork deleted ✓", isError: true)
@@ -276,10 +318,17 @@ final class NowPlayingController: ObservableObject {
 
     // MARK: - File Writes
 
-    /// Rewriting the file of the track that's playing can interrupt playback, so those writes
-    /// are queued until the track changes (or the app quits). Returns true when deferred.
+    /// Files that mustn't be rewritten now: the playing song's, and the next one's, which Music
+    /// has already loaded for gapless playback.
+    private func protectedPaths(fallback: TrackInfo? = nil) -> Set<String> {
+        let track = music.currentTrack ?? fallback
+        return Set([track?.filePath, track?.nextFilePath].compactMap { $0 })
+    }
+
+    /// Rewriting the playing (or next) song's file can interrupt playback, so those writes are
+    /// queued until neither is playing or up next (or the app quits). Returns true when deferred.
     private func writeOrDefer(path: String, lyrics: String?, artwork: Data?) async throws -> Bool {
-        if music.currentTrack?.filePath == path {
+        if protectedPaths().contains(path) {
             writeQueue.enqueue(path: path, lyrics: lyrics, artwork: artwork)
             return true
         }
@@ -287,8 +336,8 @@ final class NowPlayingController: ObservableObject {
         return false
     }
 
-    private func flushPendingWrites(except currentPath: String?) async {
-        let failures = await writeQueue.flush(except: currentPath)
+    private func flushPendingWrites(except protected: Set<String>) async {
+        let failures = await writeQueue.flush(except: protected)
         if failures > 0 {
             showStatus("Deferred file write failed", isError: true)
         }
@@ -297,7 +346,7 @@ final class NowPlayingController: ObservableObject {
     /// Write everything still queued, including the playing track. Called on quit.
     func flushAllPendingWrites() async {
         bulkTask?.cancel()
-        _ = await writeQueue.flush(except: nil)
+        _ = await writeQueue.flush(except: [])
     }
 
     // MARK: - Clipboard
@@ -441,10 +490,10 @@ final class FileWriteQueue {
         pending[path] = write
     }
 
-    /// Write all queued entries except `currentPath`. Returns the number of failures;
+    /// Write all queued entries except the `protected` paths. Returns the number of failures;
     /// failed entries are dropped so they don't retry forever.
-    func flush(except currentPath: String?) async -> Int {
-        let toFlush = pending.filter { $0.key != currentPath }
+    func flush(except protected: Set<String>) async -> Int {
+        let toFlush = pending.filter { !protected.contains($0.key) }
         var failures = 0
         for (path, write) in toFlush {
             pending.removeValue(forKey: path)

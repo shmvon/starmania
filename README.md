@@ -4,21 +4,22 @@ A macOS menu bar app for Apple Music: rate and favorite songs, star albums, and 
 
 ## Features
 
-- **Menu bar icon** showing the current song: solid/hollow star for favorite, rating top-right, × for dislike. A dot and a gentle pulse mean a suggestion is waiting.
-- **Floating panel** (click the icon). Song favorite, dislike and rating stay on top; below it, one page at a time:
-  - **Cover** — the artwork, with playback controls on hover. Fetch (iTunes Store), write into the file, copy.
-  - **Lyrics** — embedded, or fetched from LRCLIB, SongLyrics.com or Genius. Timed lyrics highlight the current line. Fetch, write into the file, copy (⌥ copies with timestamps).
-  - **Album** — a big star to favorite the album, the album rating, year and genre checked against MusicBrainz, and the album (or playlist) tracks with their own ratings.
-  - Hold ⌥ to turn Write into Delete.
+- **Menu bar icon** showing the current song: solid/hollow star for favorite, rating top-right, × for dislike. A gentle pulse means a suggestion is waiting.
+- **Floating panel** (click the icon, or your shortcut): the song, one page at a time, and the song's favorite, dislike and rating at the bottom:
+  - **Cover** — the artwork, with playback controls on hover. Drag it out as a PNG, or right-click to copy, fetch again, save to the file or delete.
+  - **Lyrics** — embedded, or fetched from LRCLIB, SongLyrics.com or Genius. Timed lyrics highlight the current line. Right-click to copy (with or without timing), fetch again, save or delete.
+  - **Album** — a big star to favorite the album, the album rating, year and genre checked against MusicBrainz (other genres to pick from right next to it), and the album (or playlist) tracks with their own ratings.
+  - Playback controls next to the page tabs.
 - **Synced lyrics**
   - Lyrics with `[mm:ss.xx]` timestamps — in a file tag or from a provider — are shown highlighted line by line.
   - For songs with plain lyrics, Starmania looks for a timed version and offers to replace them, but only when at least 75% of the words are the same, so only the timing is added.
 - **Album star**: stars an album once enough of its songs are favorited (or rated highly). The number and the rule are settings; Starmania never removes an album star.
 - **Year and genre check**: compares the playing album with [MusicBrainz](https://musicbrainz.org), an open music database — the year of the first release (not a remaster's) and the genres its users voted for. Changes apply to the whole album.
+- **Missing lyrics and artwork** are fetched for the playing song and saved to the file, or offered to save.
 - **Propose or automate**: each check is Off, Propose (pulse + a card in the panel with Apply / Dismiss; dismissals are remembered) or Automate. Checks only run for what's playing, never across the whole library.
-- **Global shortcuts**: ⌃⌥1–5 rate, ⌃⌥0 clears the rating, ⌃⌥F favorite, ⌃⌥D dislike.
+- **Global shortcuts**: a shortcut of your choice shows the panel; ⌃⌥1–5 rate, ⌃⌥0 clears the rating, ⌃⌥F favorite, ⌃⌥D dislike.
 - **Bulk fetch** of missing lyrics and artwork for the current album or playlist (settings menu).
-- **Settings**: ⌥-click or right-click the icon, or the gear in the panel.
+- **Settings**: right-click (or ⌥-click) the menu bar icon.
 
 ### Where changes are stored
 
@@ -29,7 +30,9 @@ A macOS menu bar app for Apple Music: rate and favorite songs, star albums, and 
 | Year, genre | Set in Music, which writes them into the file | Music's library |
 | Ratings, favorites, album star | Music's library (Music doesn't put these in files) | Music's library |
 
-For local files Starmania reads lyrics and year straight from the file, so it shows what the file holds even before Music notices a change. Writes to the file of the song that's playing are queued until the song changes (rewriting a playing file can interrupt playback); anything still queued is written when you quit.
+For local files Starmania reads lyrics and year straight from the file, so it shows what the file holds even before Music notices a change.
+
+Rewriting the file of the song that's playing interrupts playback, and rewriting the next song's file (Music loads it early for gapless playback) can stop playback at the transition — and Music rewrites a file whenever its year or genre is set, even to the same value. So changes to those two songs (lyrics, artwork, year, genre) wait until neither is playing or up next, album-wide changes skip songs that already have the value, and anything still waiting is written when you quit.
 
 ## Requirements
 

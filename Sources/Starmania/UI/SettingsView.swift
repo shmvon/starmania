@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import Carbon.HIToolbox
 
 struct SettingsView: View {
     @ObservedObject private var settings = SettingsManager.shared
@@ -8,11 +9,12 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Automation") {
-                Toggle("Auto-fetch lyrics when a track has none", isOn: $settings.settings.autoFetchLyrics)
-                Toggle("Auto-fetch artwork when a track has none", isOn: $settings.settings.autoFetchArtwork)
-                Toggle("Auto-write fetched lyrics to the file", isOn: $settings.settings.autoWriteLyrics)
-                Toggle("Auto-write fetched artwork to the file if it has none", isOn: $settings.settings.autoWriteArtwork)
+            Section("Missing lyrics and artwork") {
+                Picker("Lyrics", selection: $settings.settings.missingLyrics) { modeOptions }
+                Picker("Artwork", selection: $settings.settings.missingArtwork) { modeOptions }
+                Text("When the playing song has none, they're fetched and shown, then saved to the file (Automate) or offered to save (Propose). Right-click the cover or lyrics for copy, fetch again, save and delete.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Lyrics") {
@@ -67,6 +69,9 @@ struct SettingsView: View {
             }
 
             Section("Shortcuts") {
+                LabeledContent("Show panel") {
+                    ShortcutRecorder(combo: $settings.settings.panelHotkey)
+                }
                 Toggle("Global rating shortcuts", isOn: $settings.settings.ratingHotkeysEnabled)
                 Text("⌃⌥1–5 rate · ⌃⌥0 clear rating · ⌃⌥F favorite · ⌃⌥D dislike")
                     .font(.caption)
@@ -126,5 +131,73 @@ struct SettingsView: View {
         }
         let actual = service.status == .enabled || service.status == .requiresApproval
         if actual != launchAtLogin { launchAtLogin = actual }
+    }
+}
+
+// MARK: - Shortcut Recorder
+
+/// Click, then press a key combination with ⌘, ⌃ or ⌥. Esc cancels, Delete clears.
+struct ShortcutRecorder: View {
+    @Binding var combo: KeyCombo?
+    @State private var recording = false
+    @State private var monitor: Any?
+    @State private var hint: String?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: toggleRecording) {
+                Text(recording ? "Type shortcut…" : (combo?.display ?? "Record Shortcut"))
+                    .frame(minWidth: 110)
+            }
+            if combo != nil && !recording {
+                Button(action: { combo = nil }) {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove shortcut")
+            }
+            if let hint {
+                Text(hint).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .onDisappear(perform: stop)
+    }
+
+    private func toggleRecording() {
+        recording ? stop() : start()
+    }
+
+    private func start() {
+        recording = true
+        hint = nil
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            switch Int(event.keyCode) {
+            case kVK_Escape:
+                stop()
+            case kVK_Delete, kVK_ForwardDelete:
+                combo = nil
+                stop()
+            default:
+                guard !flags.intersection([.command, .control, .option]).isEmpty else {
+                    hint = "Use ⌘, ⌃ or ⌥"
+                    return nil
+                }
+                let key = HotkeyManager.keyName(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers)
+                combo = KeyCombo(
+                    keyCode: UInt32(event.keyCode),
+                    modifiers: HotkeyManager.carbonModifiers(flags),
+                    display: HotkeyManager.displayString(modifiers: flags, key: key)
+                )
+                stop()
+            }
+            return nil  // Swallow the key while recording
+        }
+    }
+
+    private func stop() {
+        recording = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }
