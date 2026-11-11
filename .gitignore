@@ -21,3 +21,6 @@ xcuserdata/
 # Test files and documentation
 /Ignore
 /_Ignore
+
+# Release zips made by ./build.sh --zip
+dist/

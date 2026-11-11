@@ -62,6 +62,49 @@ class MetadataWriter: @unchecked Sendable {
         }
     }
     
+    // MARK: - Tag Reading
+
+    struct FileTags: Equatable {
+        var lyrics: String?
+        var year: Int?
+        var genre: String?
+    }
+
+    /// Read lyrics, year and genre straight from the file, so what Starmania shows is what the
+    /// file holds (Music's database copy can lag behind after a tag write). Nil for unsupported files.
+    func readTags(filePath: String) async -> FileTags? {
+        guard FileManager.default.fileExists(atPath: filePath) else { return nil }
+        switch Self.format(of: filePath) {
+        case .mp3:
+            guard let tag = try? ID3TagEditor().read(from: filePath) else { return FileTags() }
+            let reader = ID3TagContentReader(id3Tag: tag)
+            let lyrics = reader.unsynchronizedLyrics().map(\.content).first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            let year = reader.recordingDateTime()?.year ?? reader.recordingYear()
+            let genre = reader.genre().flatMap { $0.description ?? $0.identifier.map { "\($0)" } }
+            return FileTags(lyrics: lyrics, year: year, genre: genre)
+        case .m4a:
+            let asset = AVURLAsset(url: URL(fileURLWithPath: filePath))
+            let metadata = (try? await asset.load(.metadata)) ?? []
+            func string(_ id: AVMetadataIdentifier) async -> String? {
+                guard let item = metadata.first(where: { $0.identifier == id }) else { return nil }
+                return try? await item.load(.stringValue)
+            }
+            let lyrics = await string(.iTunesMetadataLyrics)
+            let date = await string(.iTunesMetadataReleaseDate)
+            let genre = await string(.iTunesMetadataUserGenre)
+            return FileTags(lyrics: lyrics, year: date.flatMap(Self.year(fromDate:)), genre: genre)
+        case nil:
+            return nil
+        }
+    }
+
+    /// "2005", "2005-01-10" or "2005-01-10T08:00:00Z" → 2005.
+    nonisolated static func year(fromDate text: String) -> Int? {
+        let digits = text.trimmingCharacters(in: .whitespaces).prefix(4)
+        guard digits.count == 4, let year = Int(digits), year > 0 else { return nil }
+        return year
+    }
+
     enum TagFormat { case mp3, m4a }
     
     /// Only plain MP3 and MPEG-4 audio are writable. Raw ADTS `.aac` has no tag container

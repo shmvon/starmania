@@ -24,6 +24,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var clickMonitor: Any?
     private var modifierTimer: Timer?
+    /// Suggestions are waiting: the icon shows a dot and pulses while the panel is closed.
+    private var needsAttention = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon
@@ -37,7 +39,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Start music observer and the lyrics/artwork controller
         NowPlayingController.shared.start()
+        SuggestionCenter.shared.start()
         MusicObserver.shared.startPolling()
+
+        SuggestionCenter.shared.$suggestions
+            .map { !$0.isEmpty }
+            .removeDuplicates()
+            .sink { [weak self] pending in
+                self?.needsAttention = pending
+                self?.updateStatusIcon()
+                self?.updatePulse()
+            }
+            .store(in: &cancellables)
+
+        // The panel's height changes with suggestions and when a track starts or stops
+        Publishers.Merge3(
+            SuggestionCenter.shared.$suggestions.map { $0.count }.removeDuplicates().map { _ in () },
+            MusicObserver.shared.$currentTrack.map { $0 == nil }.removeDuplicates().map { _ in () },
+            SettingsManager.shared.$settings.map(\.panelPage).removeDuplicates().map { _ in () }
+        )
+        .debounce(for: .seconds(0.05), scheduler: RunLoop.main)
+        .sink { [weak self] in self?.resizePanelKeepingTop() }
+        .store(in: &cancellables)
         
         // Observe track changes to update menu bar icon
         MusicObserver.shared.$currentTrack
@@ -161,7 +184,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             annotWidth = max(annotWidth, bottomNS.size(withAttributes: [.font: xFont]).width)
         }
         
-        let totalWidth = starBounds.width + (annotWidth > 0 ? annotWidth + 1 : 0)
+        let dotSize: CGFloat = 4
+        let annotatedWidth = starBounds.width + (annotWidth > 0 ? annotWidth + 1 : 0)
+        let totalWidth = annotatedWidth + (needsAttention ? dotSize + 2 : 0)
+        let showDot = needsAttention
         
         let image = NSImage(size: NSSize(width: ceil(totalWidth), height: menuBarHeight), flipped: false) { _ in
             // Draw star, centered vertically but 0.5pt lower
@@ -185,11 +211,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 bottomNS.draw(at: NSPoint(x: annotX, y: xY), withAttributes: [.font: xFont])
             }
             
+            // Something waits for a decision (a suggestion in the panel)
+            if showDot {
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: NSRect(x: annotatedWidth + 2, y: (menuBarHeight - dotSize) / 2, width: dotSize, height: dotSize)).fill()
+            }
+            
             return true
         }
         
         image.isTemplate = true  // Adapts to light/dark menu bar automatically
         return image
+    }
+    
+    /// Gently pulse the icon while suggestions wait and the panel is closed (not with Reduce Motion).
+    private func updatePulse() {
+        guard let button = statusItem?.button else { return }
+        button.wantsLayer = true
+        let shouldPulse = needsAttention && !panelState.isVisible
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if shouldPulse {
+            guard button.layer?.animation(forKey: "pulse") == nil else { return }
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1.0
+            pulse.toValue = 0.3
+            pulse.duration = 0.9
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            button.layer?.add(pulse, forKey: "pulse")
+        } else {
+            button.layer?.removeAnimation(forKey: "pulse")
+        }
     }
     
     // MARK: - Floating Panel (no arrow)
@@ -198,6 +251,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hostingView = NSHostingView(rootView: PopoverView(panel: panelState) { [weak self] in
             self?.showSettingsMenu()
         })
+        hostingView.sizingOptions = []  // The panel is resized explicitly, keeping its top edge
         
         // Let the hosting view size itself from SwiftUI content
         let fittingSize = hostingView.fittingSize
@@ -221,6 +275,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         self.panelWindow = panel
     }
     
+    /// Fit the panel to its content, keeping it attached below the menu bar.
+    private func resizePanelKeepingTop() {
+        guard let panel = panelWindow, panel.isVisible, let hostingView = panel.contentView else { return }
+        let size = hostingView.fittingSize
+        guard size.height != panel.frame.height || size.width != panel.frame.width else { return }
+        let frame = NSRect(x: panel.frame.minX, y: panel.frame.maxY - size.height, width: size.width, height: size.height)
+        panel.setFrame(frame, display: true)
+        hostingView.frame = NSRect(origin: .zero, size: size)
+    }
+    
     private func togglePanel() {
         guard let panel = panelWindow, let button = statusItem?.button else { return }
         
@@ -239,6 +303,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let hostingView = panel.contentView {
             let size = hostingView.fittingSize
             panel.setContentSize(size)
+            hostingView.frame = NSRect(origin: .zero, size: size)
         }
         
         // Position panel below the status item
@@ -255,6 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         panel.orderFrontRegardless()
         panelState.isVisible = true
+        updatePulse()
         
         // Monitor clicks outside to dismiss
         startClickMonitoring()
@@ -264,6 +330,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func hidePanel() {
         panelWindow?.orderOut(nil)
         panelState.isVisible = false
+        updatePulse()
         stopClickMonitoring()
         stopModifierSampling()
     }
@@ -368,26 +435,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         menu.addItem(.separator())
         
-        // Lyrics Provider Selection
-        let providerMenu = NSMenu()
-        let currentProvider = SettingsManager.shared.settings.lyricsProvider
-        for option in LyricsProviderOption.allCases {
-            let item = NSMenuItem(
-                title: option.title,
-                action: #selector(selectLyricsProvider(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = option
-            item.state = (currentProvider == option) ? .on : .off
-            providerMenu.addItem(item)
-        }
-        let providerMenuItem = NSMenuItem(title: "Lyrics Provider", action: nil, keyEquivalent: "")
-        providerMenuItem.submenu = providerMenu
-        menu.addItem(providerMenuItem)
-        
-        menu.addItem(.separator())
-        
         // Bulk fetch for the current album / playlist
         let controller = NowPlayingController.shared
         let bulkItem = NSMenuItem(
@@ -440,11 +487,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsManager.shared.settings.autoWriteArtwork.toggle()
     }
     
-    @objc private func selectLyricsProvider(_ sender: NSMenuItem) {
-        guard let option = sender.representedObject as? LyricsProviderOption else { return }
-        SettingsManager.shared.settings.lyricsProvider = option
-    }
-    
     @objc private func toggleBulkFetch() {
         let controller = NowPlayingController.shared
         if controller.isBulkRunning {
@@ -476,7 +518,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let alert = NSAlert()
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
             alert.messageText = "Starmania (\(version))"
-            alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon\n\nLyrics databases: SongLyrics, LRCLIB / Lyrica, Genius."
+            alert.informativeText = "A macOS menu bar app to rate songs in Apple Music and to fetch lyrics and artwork.\n\n© 2026 shmvon\n\nLyrics: LRCLIB / Lyrica, SongLyrics, Genius. Album years and genres: MusicBrainz."
             alert.alertStyle = .informational
             alert.addButton(withTitle: "OK")
             alert.addButton(withTitle: "GitHub")

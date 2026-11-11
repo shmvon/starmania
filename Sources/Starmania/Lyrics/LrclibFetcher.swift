@@ -6,7 +6,7 @@ class LrclibFetcher: @unchecked Sendable {
 
     private init() {}
 
-    private let userAgent = "Starmania/2.0 (macOS menu bar player)"
+    private let userAgent = "Starmania/3.0 ( https://github.com/shmvon/starmania )"
 
     func fetchLyrics(title: String, artist: String, album: String? = nil, lyricaBaseURL: String = "") async throws -> LyricsResult {
         let cleanTitle = TextMatching.stripBrackets(title)

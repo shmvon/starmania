@@ -10,6 +10,8 @@ class MusicObserver: ObservableObject {
     @Published var currentTrack: TrackInfo?
     @Published var musicRunning: Bool = false
     @Published var errorMessage: String?
+    /// Bumped after every write to Music finishes, so album counts can be refreshed.
+    @Published private(set) var writeTick = 0
 
     private let runner = AppleScriptRunner.shared
     private var pollTimer: Timer?
@@ -115,20 +117,35 @@ class MusicObserver: ObservableObject {
         // Get artwork and embedded lyrics only when the track changed
         var artworkData = currentTrack?.artworkData
         var embeddedLyrics = currentTrack?.embeddedLyrics
+        var fileTags = currentTrack?.fileTags
         if trackChanged {
             artworkData = await runner.runData(Self.trackScript(polled.persistentID, "return raw data of artwork 1 of t"))
-            embeddedLyrics = await fetchEmbeddedLyrics(persistentID: polled.persistentID)
+            // The file's own tag is the source of truth; Music's copy is the fallback
+            fileTags = nil
+            if let path = polled.filePath {
+                fileTags = await MetadataWriter.shared.readTags(filePath: path)
+            }
+            embeddedLyrics = fileTags?.lyrics
+            if embeddedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                embeddedLyrics = await fetchEmbeddedLyrics(persistentID: polled.persistentID)
+            }
         }
 
         var track = polled
         track.artworkData = artworkData
         track.embeddedLyrics = embeddedLyrics
+        track.fileTags = fileTags
 
         // A local edit happened while this poll was in flight: keep the optimistic values
         if generation != editGeneration, !trackChanged, let current = currentTrack {
             track.favorited = current.favorited
             track.disliked = current.disliked
             track.rating = current.rating
+            track.albumFavorited = current.albumFavorited
+            track.albumRating = current.albumRating
+            track.albumRatingComputed = current.albumRatingComputed
+            track.year = current.year
+            track.genre = current.genre
         }
 
         lastTrackKey = track.trackKey
@@ -158,7 +175,29 @@ class MusicObserver: ObservableObject {
             try
                 set dur to duration of t
             end try
-            return pState & US & (persistent ID of t) & US & (name of t) & US & (artist of t) & US & (album of t) & US & (favorited of t as string) & US & (disliked of t as string) & US & (rating of t as string) & US & loc & US & (pos as string) & US & (dur as string)
+            set aa to ""
+            try
+                set aa to album artist of t
+            end try
+            set yr to 0
+            try
+                set yr to year of t
+            end try
+            set gn to ""
+            try
+                set gn to genre of t
+            end try
+            set aFav to false
+            try
+                set aFav to album favorited of t
+            end try
+            set aRat to 0
+            set aKind to "computed"
+            try
+                set aRat to album rating of t
+                set aKind to album rating kind of t as string
+            end try
+            return pState & US & (persistent ID of t) & US & (name of t) & US & (artist of t) & US & (album of t) & US & (favorited of t as string) & US & (disliked of t as string) & US & (rating of t as string) & US & loc & US & (pos as string) & US & (dur as string) & US & aa & US & (yr as string) & US & gn & US & (aFav as string) & US & (aRat as string) & US & aKind
         on error errMsg
             return "ERROR" & errMsg
         end try
@@ -171,7 +210,7 @@ class MusicObserver: ObservableObject {
         guard parts.count >= 11, parts[0] == "playing" || parts[0] == "paused" else { return nil }
 
         let rawRating = Int(parts[7]) ?? 0
-        return TrackInfo(
+        var track = TrackInfo(
             persistentID: parts[1],
             name: parts[2],
             artist: parts[3],
@@ -187,6 +226,15 @@ class MusicObserver: ObservableObject {
             positionDate: Date(),
             duration: parseNumber(parts[10])
         )
+        if parts.count >= 17 {
+            track.albumArtist = parts[11]
+            track.year = Int(parts[12]) ?? 0
+            track.genre = parts[13]
+            track.albumFavorited = parts[14].lowercased() == "true"
+            track.albumRating = (Int(parts[15]) ?? 0) / 20
+            track.albumRatingComputed = parts[16] != "user"
+        }
+        return track
     }
 
     nonisolated private static func parseNumber(_ text: String) -> Double {
@@ -239,6 +287,7 @@ class MusicObserver: ObservableObject {
         editGeneration += 1
         Task {
             _ = await runner.run(script)
+            writeTick += 1
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
             }
@@ -300,6 +349,108 @@ class MusicObserver: ObservableObject {
             currentTrack?.embeddedLyrics = lyrics.isEmpty ? nil : lyrics
         }
         runWrite(Self.trackScript(pid, "set lyrics of t to \"\(Self.escapeForAppleScript(lyrics))\""))
+    }
+
+    /// Star (favorite) the album of the given track; Music stores this per album.
+    func setAlbumFavorited(_ value: Bool, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        if isCurrent(trackID) { currentTrack?.albumFavorited = value }
+        runWrite(Self.trackScript(pid, "set album favorited of t to \(value)"))
+    }
+
+    /// Set the album rating (0 = let Music compute it from the track ratings).
+    func setAlbumRating(_ stars: Int, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        let stars = max(0, min(5, stars))
+        if isCurrent(trackID) {
+            currentTrack?.albumRating = stars
+            currentTrack?.albumRatingComputed = stars == 0
+        }
+        runWrite(Self.trackScript(pid, "set album rating of t to \(stars * 20)"))
+    }
+
+    /// Set the year on every track of the album. For local files Music also writes it into the file's tags.
+    func setAlbumYear(_ year: Int, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        if isCurrent(trackID) { currentTrack?.year = year }
+        runWrite(Self.trackScript(pid, Self.albumTracksBody("set year of x to \(max(0, year))")))
+    }
+
+    /// Set the genre on every track of the album.
+    func setAlbumGenre(_ genre: String, trackID: String? = nil) {
+        guard let pid = resolvedID(trackID) else { return }
+        if isCurrent(trackID) { currentTrack?.genre = genre }
+        runWrite(Self.trackScript(pid, Self.albumTracksBody("set genre of x to \"\(Self.escapeForAppleScript(genre))\"")))
+    }
+
+    /// Script body (inside `trackScript`) that runs `action` on each track `x` of `t`'s album.
+    nonisolated static func albumTracksBody(_ action: String) -> String {
+        """
+        \(albumSpecBody)
+                set ts to contents of spec
+                if ts is {} then set ts to {t}
+                repeat with x in ts
+                    try
+                        \(action)
+                    end try
+                end repeat
+                return (count of ts) as text
+        """
+    }
+
+    /// Resolves `spec`, the library tracks on the same album (same album artist, or artist) as `t`.
+    nonisolated private static let albumSpecBody = """
+                set al to album of t
+                set aa to ""
+                try
+                    set aa to album artist of t
+                end try
+                if aa is "" then set aa to artist of t
+                set spec to a reference to (every track of library playlist 1 whose album is al and (album artist is aa or artist is aa))
+        """
+
+    // MARK: - Album Counts
+
+    struct AlbumStats: Equatable {
+        let trackCount: Int
+        let favoritedCount: Int
+        let ratings: [Int]     // 0-5 per track
+        let favorited: [Bool]
+
+        func qualifying(_ criterion: AlbumStarCriterion, minRating: Int) -> Int {
+            zip(favorited, ratings).filter { fav, rating in
+                switch criterion {
+                case .favorited: return fav
+                case .rated: return rating >= minRating
+                case .either: return fav || rating >= minRating
+                }
+            }.count
+        }
+    }
+
+    nonisolated static func albumStatsScript(_ persistentID: String) -> String {
+        trackScript(persistentID, """
+            set US to character id 31
+            set RS to character id 30
+            \(albumSpecBody)
+                    set AppleScript's text item delimiters to RS
+                    return "ok" & US & ((favorited of spec) as text) & US & ((rating of spec) as text)
+            """)
+    }
+
+    /// Favorites and ratings of every library track on the album of the given track.
+    func fetchAlbumStats(trackID: String) async -> AlbumStats? {
+        guard let output = await runner.run(Self.albumStatsScript(trackID), cache: false) else { return nil }
+        return Self.parseAlbumStats(output)
+    }
+
+    nonisolated static func parseAlbumStats(_ output: String) -> AlbumStats? {
+        let parts = output.components(separatedBy: US)
+        guard parts.count >= 3, parts[0] == "ok" else { return nil }
+        let favs = parts[1].isEmpty ? [] : parts[1].components(separatedBy: RS).map { $0.lowercased() == "true" }
+        let ratings = parts[2].isEmpty ? [] : parts[2].components(separatedBy: RS).map { (Int($0) ?? 0) / 20 }
+        guard favs.count == ratings.count else { return nil }
+        return AlbumStats(trackCount: favs.count, favoritedCount: favs.filter { $0 }.count, ratings: ratings, favorited: favs)
     }
 
     func deleteArtwork() {
@@ -438,13 +589,14 @@ class MusicObserver: ObservableObject {
         """)
 
     /// Fetch up to 40 tracks from the current playlist/album, centered on the current track.
-    func fetchPlaylistTracks() async -> [PlaylistTrackInfo] {
-        guard let output = await runner.run(Self.playlistScript, cache: true) else { return [] }
+    /// `isAlbum` is true when playing from the library, so the list is the current album.
+    func fetchPlaylistTracks() async -> (isAlbum: Bool, tracks: [PlaylistTrackInfo]) {
+        guard let output = await runner.run(Self.playlistScript, cache: true) else { return (false, []) }
         let tracks = Self.parsePlaylistOutput(output)
         if tracks.isEmpty {
             print("[Starmania] Could not load playlist: \(output.prefix(200))")
         }
-        return tracks
+        return (output.hasPrefix("album"), tracks)
     }
 
     nonisolated static func parsePlaylistOutput(_ output: String, window: Int = 40) -> [PlaylistTrackInfo] {

@@ -8,7 +8,10 @@ import Combine
 final class NowPlayingController: ObservableObject {
     static let shared = NowPlayingController()
 
+    /// Plain lyrics for display and copying (timestamps stripped).
     @Published private(set) var lyrics: String = ""
+    /// LRC text when timing is known, else nil.
+    @Published private(set) var syncedLyricsText: String?
     @Published private(set) var lyricsSource: LyricsProvider?
     @Published private(set) var syncedLines: [LyricLine] = []
     @Published private(set) var lyricsLoading = false
@@ -49,21 +52,21 @@ final class NowPlayingController: ObservableObject {
         activeLyricsRequestID = UUID()
         lyricsLoading = false
         lyricsError = nil
-        syncedLines = []
         clearStatus()
+        SuggestionCenter.shared.withdraw(.syncedLyrics)
 
         guard let track else {
-            lyrics = ""
-            lyricsSource = nil
+            setLyrics(nil, source: nil)
             return
         }
 
         if let embedded = normalizedLyrics(track.embeddedLyrics) {
-            lyrics = embedded
-            lyricsSource = .embedded
+            setLyrics(embedded, source: .embedded)
+            if syncedLyricsText == nil {
+                checkForSyncedLyrics(track, existing: embedded)
+            }
         } else {
-            lyrics = ""
-            lyricsSource = nil
+            setLyrics(nil, source: nil)
             if settings.settings.autoFetchLyrics {
                 startLyricsFetch(for: track)
             }
@@ -76,6 +79,27 @@ final class NowPlayingController: ObservableObject {
 
     private func isCurrent(_ track: TrackInfo) -> Bool {
         music.currentTrack?.trackKey == track.trackKey
+    }
+
+    /// Show lyrics from any source; LRC text (in a tag or from a provider) becomes synced lines.
+    private func setLyrics(_ text: String?, source: LyricsProvider?) {
+        let text = text ?? ""
+        if LRCParser.isSynced(text) {
+            syncedLyricsText = text
+            syncedLines = LRCParser.parse(text)
+            lyrics = LRCParser.plainText(text)
+        } else {
+            syncedLyricsText = nil
+            syncedLines = []
+            lyrics = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        lyricsSource = text.isEmpty ? nil : source
+    }
+
+    /// What goes into the tag: LRC when timing is known (and the setting allows it), else plain text.
+    private func textToStore(plain: String, synced: String?) -> String {
+        if settings.settings.storeSyncedLyrics, let synced, LRCParser.isSynced(synced) { return synced }
+        return plain
     }
 
     // MARK: - Lyrics
@@ -103,13 +127,11 @@ final class NowPlayingController: ObservableObject {
                     preferredProvider: s.lyricsProvider
                 )
                 guard activeLyricsRequestID == requestID, isCurrent(track) else { return }
-                lyrics = result.lyrics
-                lyricsSource = result.provider
-                syncedLines = result.syncedLyrics.map(LRCParser.parse) ?? []
+                setLyrics(result.syncedLyrics ?? result.lyrics, source: result.provider)
                 lyricsLoading = false
 
                 if settings.settings.autoWriteLyrics && track.isLocal {
-                    await writeLyrics(result.lyrics, to: track)
+                    await writeLyrics(textToStore(plain: result.lyrics, synced: result.syncedLyrics), to: track)
                 }
             } catch {
                 guard activeLyricsRequestID == requestID, isCurrent(track) else { return }
@@ -121,16 +143,50 @@ final class NowPlayingController: ObservableObject {
 
     func writeLyricsToFile() {
         guard let track = music.currentTrack, !lyrics.isEmpty else { return }
-        let text = lyrics
+        let text = textToStore(plain: lyrics, synced: syncedLyricsText)
         Task { await writeLyrics(text, to: track) }
     }
 
     func deleteLyrics() {
         guard let track = music.currentTrack else { return }
-        lyrics = ""
-        lyricsSource = nil
-        syncedLines = []
+        setLyrics(nil, source: nil)
         Task { await writeLyrics("", to: track) }
+    }
+
+    // MARK: - Synced Lyrics Upgrade
+
+    /// The track has plain lyrics: look for a timed version of the same text. It is only offered
+    /// when at least 75% of the words agree, so only the timing is added, not different lyrics.
+    private func checkForSyncedLyrics(_ track: TrackInfo, existing: String) {
+        let s = settings.settings
+        guard s.syncedLyricsUpgrade != .off else { return }
+        Task {
+            guard let result = try? await LrclibFetcher.shared.fetchLyrics(
+                title: track.name, artist: track.artist, album: track.album, lyricaBaseURL: s.lyricaBaseURL
+            ), let synced = result.syncedLyrics, LRCParser.isSynced(synced), isCurrent(track),
+               syncedLyricsText == nil else { return }
+
+            let score = LyricsSimilarity.score(existing, synced)
+            guard score >= Self.syncedMatchThreshold else {
+                print("[Starmania] Synced lyrics rejected: only \(Int(score * 100))% match")
+                return
+            }
+            SuggestionCenter.shared.offer(Suggestion(
+                id: "syncedLyrics|\(track.trackKey)",
+                kind: .syncedLyrics,
+                title: "Add timing to the lyrics",
+                detail: "\(result.provider.displayName) has synced lyrics, \(Int(score * 100))% the same words",
+                applyTitle: "Replace",
+                apply: { NowPlayingController.shared.applySyncedLyrics(synced, provider: result.provider, to: track) }
+            ))
+        }
+    }
+
+    nonisolated static let syncedMatchThreshold = 0.75
+
+    private func applySyncedLyrics(_ synced: String, provider: LyricsProvider, to track: TrackInfo) {
+        if isCurrent(track) { setLyrics(synced, source: provider) }
+        Task { await writeLyrics(synced, to: track) }
     }
 
     /// Local tracks get the lyrics in the file tag; streaming tracks in Music's database.
@@ -246,11 +302,13 @@ final class NowPlayingController: ObservableObject {
 
     // MARK: - Clipboard
 
-    func copyLyrics() {
+    /// Copy plain lyrics, or the timed LRC text when `withTiming` is set (⌥).
+    func copyLyrics(withTiming: Bool = false) {
+        let text = withTiming ? (syncedLyricsText ?? lyrics) : lyrics
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(lyrics, forType: .string)
-        showStatus("Lyrics copied ✓")
+        pasteboard.setString(text, forType: .string)
+        showStatus(withTiming && syncedLyricsText != nil ? "Synced lyrics copied ✓" : "Lyrics copied ✓")
     }
 
     func copyArtwork() {
@@ -298,19 +356,18 @@ final class NowPlayingController: ObservableObject {
                     geniusAPIKey: s.geniusAPIKey, lyricaBaseURL: s.lyricaBaseURL,
                     preferredProvider: s.lyricsProvider
                 ) else { continue }
+                let stored = textToStore(plain: result.lyrics, synced: result.syncedLyrics)
 
                 if let path = track.filePath {
-                    if (try? await writeOrDefer(path: path, lyrics: result.lyrics, artwork: nil)) != nil {
+                    if (try? await writeOrDefer(path: path, lyrics: stored, artwork: nil)) != nil {
                         lyricsWritten += 1
                     }
                 } else {
-                    music.setLyrics(result.lyrics, trackID: track.persistentID)
+                    music.setLyrics(stored, trackID: track.persistentID)
                     lyricsWritten += 1
                 }
                 if track.persistentID == music.currentTrack?.persistentID, lyrics.isEmpty {
-                    lyrics = result.lyrics
-                    lyricsSource = result.provider
-                    syncedLines = result.syncedLyrics.map(LRCParser.parse) ?? []
+                    setLyrics(result.syncedLyrics ?? result.lyrics, source: result.provider)
                 }
             }
 

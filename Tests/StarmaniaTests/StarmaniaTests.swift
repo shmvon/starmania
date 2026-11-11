@@ -218,6 +218,11 @@ func appleScriptsCompile() throws {
         "bulk": MusicObserver.bulkScript,
         "track": MusicObserver.trackScript("ABCDEF0123456789", "set rating of t to 60"),
         "lyrics": MusicObserver.trackScript("ABCDEF0123456789", "set lyrics of t to \"\(MusicObserver.escapeForAppleScript("a \"quoted\" \\ line\nnext"))\""),
+        "albumStats": MusicObserver.albumStatsScript("ABCDEF0123456789"),
+        "albumYear": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.albumTracksBody("set year of x to 2005")),
+        "albumGenre": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.albumTracksBody("set genre of x to \"Indie Rock\"")),
+        "albumStar": MusicObserver.trackScript("ABCDEF0123456789", "set album favorited of t to true"),
+        "albumRating": MusicObserver.trackScript("ABCDEF0123456789", "set album rating of t to 80"),
     ]
     for (name, source) in scripts {
         var error: NSDictionary?
@@ -226,4 +231,147 @@ func appleScriptsCompile() throws {
         let message = error?[NSAppleScript.errorMessage] as? String ?? ""
         #expect(compiled, "\(name) script: \(message)")
     }
+}
+
+// MARK: - 3.0: Synced lyrics in tags
+
+/// Lyrics as stored in the tag of Adam Green's "All Hell Breaks Loose": every line is timed,
+/// and empty timed lines close each line.
+private let adamGreenLRC = """
+[00:13.00] Walls start closing in around you
+[00:14.15]
+[00:16.40] Second line of the verse
+[00:18.00]
+[00:20.10] Third line here
+[00:21.50]
+"""
+
+@Test func detectsTimedLyricsInATag() {
+    #expect(LRCParser.isSynced(adamGreenLRC))
+    #expect(!LRCParser.isSynced("Walls start closing in\n[Chorus]\nSomething else\nAnd more"))
+    #expect(!LRCParser.isSynced("[00:01.00] only\n[00:02.00] two"))  // Too few timed lines
+    #expect(LRCParser.isSynced("[ar:Adam Green]\n[ti:Song]\n" + adamGreenLRC))  // Metadata ignored
+}
+
+@Test func plainTextDropsLineEndMarkers() {
+    #expect(LRCParser.plainText(adamGreenLRC) == "Walls start closing in around you\nSecond line of the verse\nThird line here")
+    let lines = LRCParser.parse(adamGreenLRC)
+    #expect(lines.count == 6)
+    #expect(lines[1].text.isEmpty && lines[1].time == 14.15)
+}
+
+@Test func plainTextKeepsStanzaBreaks() {
+    let lrc = "[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n[00:04.00]\n[00:05.00]d\n[00:06.00]e\n[00:07.00]f"
+    #expect(LRCParser.plainText(lrc) == "a\nb\nc\n\nd\ne\nf")
+}
+
+@Test func lrcOffsetShiftsLinesEarlier() {
+    let lines = LRCParser.parse("[offset:+500]\n[00:10.00]a\n[00:20.00]b\n[00:30.00]c")
+    #expect(lines.map(\.time) == [9.5, 19.5, 29.5])
+    #expect(LRCParser.parse("[offset:-1000]\n[00:10.00]a").first?.time == 11)
+}
+
+@Test func similarityAcceptsTimingOnlyChanges() {
+    let plain = "Walls start closing in around you\nSecond line of the verse\nThird line here"
+    #expect(LyricsSimilarity.score(plain, adamGreenLRC) == 1.0)
+    // A few words differ: still the same lyrics
+    let edited = "Walls start closing in around you\nSecond line of this verse\nThird line right here"
+    #expect(LyricsSimilarity.score(edited, adamGreenLRC) >= NowPlayingController.syncedMatchThreshold)
+    // Different song
+    #expect(LyricsSimilarity.score("Hey Jude don't make it bad take a sad song", adamGreenLRC) < 0.75)
+    #expect(LyricsSimilarity.score("", adamGreenLRC) == 0)
+    // Section labels aren't counted as words
+    #expect(LyricsSimilarity.score("[Verse 1]\n" + plain, plain) == 1.0)
+}
+
+// MARK: - 3.0: Album checks
+
+@Test func parsesExtendedPollOutput() throws {
+    let output = ["playing", "ABC", "Song", "Artist", "Album", "false", "false", "60", "", "1", "200",
+                  "Album Artist", "2008", "Rock", "true", "80", "user"].joined(separator: US)
+    let track = try #require(MusicObserver.parsePollOutput(output))
+    #expect(track.albumArtist == "Album Artist" && track.year == 2008 && track.genre == "Rock")
+    #expect(track.albumFavorited && track.albumRating == 4 && !track.albumRatingComputed)
+    #expect(track.albumKey == "album artist|album")
+}
+
+@Test func albumStatsCountByCriterion() throws {
+    let output = ["ok", ["true", "false", "true", "false"].joined(separator: RS),
+                  ["0", "80", "100", "40"].joined(separator: RS)].joined(separator: US)
+    let stats = try #require(MusicObserver.parseAlbumStats(output))
+    #expect(stats.trackCount == 4 && stats.favoritedCount == 2)
+    #expect(stats.qualifying(.favorited, minRating: 4) == 2)
+    #expect(stats.qualifying(.rated, minRating: 4) == 2)
+    #expect(stats.qualifying(.either, minRating: 4) == 3)
+    #expect(stats.qualifying(.rated, minRating: 5) == 1)
+    #expect(MusicObserver.parseAlbumStats("") == nil)
+    #expect(MusicObserver.parseAlbumStats(["ok", "", ""].joined(separator: US))?.trackCount == 0)
+}
+
+@Test func albumStarThreshold() {
+    #expect(!SuggestionCenter.shouldStarAlbum(qualifying: 5, threshold: 6))  // "More than five"
+    #expect(SuggestionCenter.shouldStarAlbum(qualifying: 6, threshold: 6))
+    #expect(SuggestionCenter.shouldStarAlbum(qualifying: 1, threshold: 0))   // Threshold is at least 1
+    #expect(!SuggestionCenter.shouldStarAlbum(qualifying: 0, threshold: 0))
+}
+
+@Test func yearComparison() {
+    #expect(SuggestionCenter.yearDiffers(music: 2008, reference: 2005))
+    #expect(SuggestionCenter.yearDiffers(music: 0, reference: 2005))
+    #expect(!SuggestionCenter.yearDiffers(music: 2005, reference: 2005))
+    #expect(!SuggestionCenter.yearDiffers(music: 2008, reference: 0))
+    #expect(MetadataWriter.year(fromDate: "2005-01-10") == 2005)
+    #expect(MetadataWriter.year(fromDate: "2005-01-10T08:00:00Z") == 2005)
+    #expect(MetadataWriter.year(fromDate: "1999") == 1999)
+    #expect(MetadataWriter.year(fromDate: "") == nil)
+    #expect(MetadataWriter.year(fromDate: "05") == nil)
+}
+
+@Test func musicBrainzSearchResultsAreMatched() throws {
+    let json: [[String: Any]] = [
+        ["id": "single", "title": "Gemstones", "primary-type": "Single", "first-release-date": "2004-11",
+         "artist-credit": [["name": "Adam Green", "artist": ["id": "ag"]]]],
+        ["id": "album", "title": "Gemstones", "primary-type": "Album", "first-release-date": "2005-01-10",
+         "artist-credit": [["name": "Adam Green", "artist": ["id": "ag"]]],
+         "tags": [["name": "rock", "count": 2], ["name": "anti-folk", "count": 1], ["name": "singer-songwriter", "count": 2]]],
+        ["id": "other", "title": "Gemstones", "primary-type": "Album", "first-release-date": "1990",
+         "artist-credit": [["name": "Someone Else"]]],
+    ]
+    let candidates = json.compactMap(MusicBrainzClient.candidate)
+    let best = try #require(MusicBrainzClient.bestMatch(in: candidates, artist: "Adam Green", album: "Gemstones (Deluxe)"))
+    #expect(best.id == "album")
+    #expect(best.year == 2005)
+    #expect(best.genres == ["rock", "singer-songwriter", "anti-folk"])  // Most votes first, ties in order
+    #expect(best.artistID == "ag")
+    #expect(MusicBrainzClient.bestMatch(in: candidates, artist: "Nobody", album: "Gemstones") == nil)
+    #expect(MusicBrainzClient.luceneEscape("Say \"Hi\"") == "Say \\\"Hi\\\"")
+}
+
+@Test func genreNamesAndAgreement() {
+    #expect(GenreMatching.displayName("singer-songwriter") == "Singer-Songwriter")
+    #expect(GenreMatching.displayName("alternative rock") == "Alternative Rock")
+    #expect(GenreMatching.agrees("Indie Rock", with: ["rock", "indie rock"]))
+    #expect(!GenreMatching.agrees("Alternative", with: ["rock", "indie rock"]))
+    #expect(!GenreMatching.agrees("", with: ["rock"]))
+    #expect(!GenreMatching.agrees("Folk", with: ["a", "b", "c", "d", "e", "folk"]))  // Only the top 5 count
+}
+
+@MainActor
+@Test func dismissedSuggestionsPersist() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("dismissed-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let store = DismissedStore(url: url)
+    #expect(!store.contains("year|a|2005"))
+    store.insert("year|a|2005")
+    #expect(DismissedStore(url: url).contains("year|a|2005"))
+}
+
+@Test func oldConfigGetsNewCheckDefaults() throws {
+    let json = #"{"geniusAPIKey":"k","autoFetchLyrics":true,"autoFetchArtwork":false,"autoWriteLyrics":false,"autoWriteArtwork":true,"lyricsProvider":"bogus"}"#
+    let settings = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
+    #expect(settings.lyricsProvider == .auto)  // Unknown values fall back instead of failing
+    #expect(settings.syncedLyricsUpgrade == .propose && settings.albumStarMode == .propose)
+    #expect(settings.albumStarThreshold == 6 && settings.albumStarCriterion == .favorited)
+    #expect(settings.yearCheck == .propose && settings.genreCheck == .propose)
+    #expect(settings.panelPage == .cover && settings.preferSyncedLyrics)
 }
