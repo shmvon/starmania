@@ -6,7 +6,7 @@ A macOS menu bar app for Apple Music: rate and favorite songs, star albums, and 
 
 - **Menu bar icon** showing the current song: solid/hollow star for favorite, rating top-right, × for dislike. A gentle pulse means a suggestion is waiting.
 - **Floating panel** (click the icon, or your shortcut): the song, one page at a time, and the song's favorite, dislike and rating at the bottom:
-  - **Cover** — the artwork, with playback controls on hover. Drag it out as a PNG, or right-click to copy, fetch again, save to the file or delete.
+  - **Cover** — the artwork, with playback controls on hover and a progress line (hover for the times, click or drag to seek). Drag it out as a PNG, or right-click to copy, fetch again, save to the file or delete.
   - **Lyrics** — embedded, or fetched from LRCLIB, SongLyrics.com or Genius. Timed lyrics highlight the current line. Right-click to copy (with or without timing), fetch again, save or delete.
   - **Album** — a big star to favorite the album, the album rating, year and genre checked against MusicBrainz (other genres to pick from right next to it), and the album (or playlist) tracks with their own ratings.
   - Playback controls next to the page tabs.
@@ -19,7 +19,7 @@ A macOS menu bar app for Apple Music: rate and favorite songs, star albums, and 
 - **Propose or automate**: each check is Off, Propose (pulse + a card in the panel with Apply / Dismiss; dismissals are remembered) or Automate. Checks only run for what's playing, never across the whole library.
 - **Global shortcuts**: a shortcut of your choice shows the panel; ⌃⌥1–5 rate, ⌃⌥0 clears the rating, ⌃⌥F favorite, ⌃⌥D dislike.
 - **Bulk fetch** of missing lyrics and artwork for the current album or playlist (settings menu).
-- **Settings**: right-click (or ⌥-click) the menu bar icon.
+- **Settings and ratings**: right-click (or ⌥-click) the menu bar icon for favorite, dislike and rating of the playing song, and Settings.
 
 ### Where changes are stored
 
@@ -69,7 +69,7 @@ Finds the Swift Testing plugin when only the Command Line Tools are installed an
 
 ```
 Starmania-gh/
-├── VERSION              The version number (3.0); build.sh stamps it into the app
+├── VERSION              The version number (3.0.2); build.sh stamps it into the app
 ├── CHANGELOG.md         What changed in each version
 ├── build.sh, test.sh    Build the app / run the tests
 ├── Package.swift        Swift package; Package.resolved pins the dependency versions

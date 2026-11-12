@@ -384,7 +384,8 @@ private let adamGreenLRC = """
 @Test func albumEditsSkipPlayingAndNextTracksAndUnchangedValues() {
     let body = MusicObserver.albumTracksBody(property: "year", value: "2005", skipping: ["AB12\" & x", "CD34"])
     #expect(body.contains("set skipList to {\"AB12\", \"CD34\"}"))  // Only hex survives
-    #expect(body.contains("if year of x is not 2005 then"))
+    #expect(body.contains("considering case"))  // "rock" → "Rock" must count as a change
+    #expect(body.contains("set differs to (year of x is not 2005)"))
     #expect(MusicObserver.parseSkipped("ok" + US + "AB12" + RS + "CD34") == ["AB12", "CD34"])
     #expect(MusicObserver.parseSkipped("ok" + US) == [])
     #expect(MusicObserver.parseSkipped("") == [])
@@ -402,6 +403,13 @@ private let adamGreenLRC = """
     #expect(edit.scriptBody.contains("set year of t to 2005"))
     #expect(edit.scriptBody.contains("set genre of t to \"Say \\\"Hi\\\"\""))
     #expect(MusicObserver.PendingEdit(year: nil, genre: nil).scriptBody.isEmpty)
+    #expect(edit.scriptBody.hasPrefix("considering case"))
+}
+
+@Test func progressTimeFormat() {
+    #expect(ProgressScrubber.format(0) == "0:00")
+    #expect(ProgressScrubber.format(65.4) == "1:05")
+    #expect(ProgressScrubber.format(3725) == "1:02:05")
 }
 
 @Test func shortcutNames() {

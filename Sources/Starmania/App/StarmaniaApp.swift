@@ -390,7 +390,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func showSettingsMenu() {
         let menu = NSMenu()
-        
+        menu.autoenablesItems = false  // Respect each item's isEnabled
+
+        // The playing song: favorite, dislike and rating, with their global shortcuts
+        if let track = MusicObserver.shared.currentTrack {
+            addSongItems(to: menu, track: track)
+            menu.addItem(.separator())
+        }
+
         // Bulk fetch for the current album / playlist
         let controller = NowPlayingController.shared
         let bulkItem = NSMenuItem(
@@ -427,6 +434,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    private func addSongItems(to menu: NSMenu, track: TrackInfo) {
+        let title = NSMenuItem(title: track.artist.isEmpty ? track.name : "\(track.name) — \(track.artist)", action: nil, keyEquivalent: "")
+        title.isEnabled = false
+        menu.addItem(title)
+
+        let shortcuts = SettingsManager.shared.settings.ratingHotkeysEnabled
+        func item(_ title: String, _ action: Selector, key: String, tag: Int = 0, on: Bool = false) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: shortcuts ? key : "")
+            item.keyEquivalentModifierMask = [.control, .option]
+            item.target = self
+            item.tag = tag
+            item.state = on ? .on : .off
+            return item
+        }
+
+        menu.addItem(item("Favorite", #selector(toggleFavoriteFromMenu), key: "f", on: track.favorited))
+        menu.addItem(item("Dislike", #selector(toggleDislikeFromMenu), key: "d", on: track.disliked))
+        menu.addItem(.separator())
+        for stars in (1...5).reversed() {
+            let label = String(repeating: "★", count: stars) + String(repeating: "☆", count: 5 - stars)
+            menu.addItem(item(label, #selector(rateFromMenu(_:)), key: "\(stars)", tag: stars, on: track.rating == stars))
+        }
+        let clear = item("Clear Rating", #selector(rateFromMenu(_:)), key: "0", tag: 0)
+        clear.isEnabled = track.rating > 0
+        menu.addItem(clear)
+    }
+
+    @objc private func toggleFavoriteFromMenu() {
+        guard let track = MusicObserver.shared.currentTrack else { return }
+        MusicObserver.shared.setFavorited(!track.favorited)
+    }
+
+    @objc private func toggleDislikeFromMenu() {
+        guard let track = MusicObserver.shared.currentTrack else { return }
+        MusicObserver.shared.setDisliked(!track.disliked)
+    }
+
+    @objc private func rateFromMenu(_ sender: NSMenuItem) {
+        MusicObserver.shared.setRating(sender.tag)
+    }
+
     @objc private func toggleBulkFetch() {
         let controller = NowPlayingController.shared
         if controller.isBulkRunning {

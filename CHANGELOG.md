@@ -3,6 +3,22 @@
 All notable changes to Starmania. Versions follow `MAJOR.MINOR` (with `.PATCH` for small fixes):
 a new major version changes how the app works, a minor one adds features, a patch only fixes things.
 
+## [3.0.2] — 2026-11-12
+
+### Fixed
+- Year and genre changes that only differ in capitalisation ("dream pop" → "Dream Pop") were never written to Music.
+- Year and genre changes waiting for the playing or next song are now written as soon as playback stops
+  (not only on quit), and an older waiting value can no longer overwrite a newer one.
+
+### Added
+- A thin progress line over the bottom of the cover; hover to see elapsed and remaining time, click or drag to seek.
+- Right-click the menu bar icon: favorite, dislike and rating of the playing song, with their shortcuts.
+- A small clock on the Album page's year/genre line while a change is waiting for the playing or next song.
+
+### Changed
+- The song's favorite, dislike and rating are a tinted footer strip, set apart from the page controls.
+- More space between the year/genre line and the track list.
+
 ## [3.0.1] — 2026-11-11
 
 ### Fixed

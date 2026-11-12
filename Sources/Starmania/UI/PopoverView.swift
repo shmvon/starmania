@@ -79,6 +79,7 @@ struct PopoverView: View {
 
     @ViewBuilder
     private func trackView(_ track: TrackInfo) -> some View {
+        VStack(spacing: 0) {
         VStack(spacing: 6) {
             trackInfo(track)
                 .padding(.top, pad)
@@ -104,11 +105,17 @@ struct PopoverView: View {
 
             tabBar(track)
                 .padding(.horizontal, pad)
+                .padding(.bottom, 4)
+        }
 
-            ratingBar(track)
-                .padding(.horizontal, pad)
-                .padding(.top, 2)
-                .padding(.bottom, pad)
+        // The song's own ratings: a footer strip, set apart from the page and its controls
+        ratingBar(track)
+            .padding(.horizontal, pad + 2)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(0.05))
+            .overlay(alignment: .top) {
+                Rectangle().fill(Color.primary.opacity(0.1)).frame(height: 0.5)
+            }
         }
         .animation(.default, value: checks.suggestions.map(\.id))
     }
@@ -116,10 +123,10 @@ struct PopoverView: View {
     // MARK: - Rating Bar (song)
 
     private func ratingBar(_ track: TrackInfo) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             Button(action: { music.setFavorited(!track.favorited) }) {
                 Image(systemName: track.favorited ? "heart.fill" : "heart")
-                    .font(.system(size: 15))
+                    .font(.system(size: 16))
                     .foregroundStyle(track.favorited ? .pink : .secondary)
             }
             .buttonStyle(.plain)
@@ -127,7 +134,7 @@ struct PopoverView: View {
 
             Button(action: { music.setDisliked(!track.disliked) }) {
                 Image(systemName: track.disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
-                    .font(.system(size: 14))
+                    .font(.system(size: 15))
                     .foregroundStyle(track.disliked ? .red : .secondary)
             }
             .buttonStyle(.plain)
@@ -135,7 +142,7 @@ struct PopoverView: View {
 
             Spacer()
 
-            starButtons(rating: track.rating, size: 14, spacing: 3, help: { "Rate \($0) (⌃⌥\($0))" }) { star in
+            starButtons(rating: track.rating, size: 15, spacing: 4, help: { "Rate \($0) (⌃⌥\($0))" }) { star in
                 music.setRating(track.rating == star ? 0 : star)
             }
         }
@@ -266,6 +273,13 @@ struct PopoverView: View {
                         Image(systemName: "forward.fill").font(.system(size: 20)).foregroundStyle(.white)
                     }.buttonStyle(.plain)
                 }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if track.duration > 0 {
+                ProgressScrubber(track: track, expanded: showPlaybackControls) { music.seek(to: $0) }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, showPlaybackControls ? 8 : 6)
             }
         }
         .onHover { hovering in
@@ -434,6 +448,7 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 6) {
             albumHeader(track)
             albumFacts(track)
+                .padding(.bottom, 6)
             playlistSection()
         }
     }
@@ -508,6 +523,13 @@ struct PopoverView: View {
                             .help("MusicBrainz genre — click to set it on the whole album")
                     }
                 }
+            }
+
+            if music.pendingEdits[track.persistentID] != nil || music.pendingEdits[track.nextPersistentID] != nil {
+                Image(systemName: "clock")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .help("The rest of the album is updated. This song and the next get the change once they're no longer playing or up next, because Music rewrites the file and would interrupt playback.")
             }
 
             lookupControl(facts)
@@ -814,6 +836,73 @@ struct PopoverView: View {
 }
 
 // MARK: - Marquee Text (horizontal scroll on hover)
+
+// MARK: - Progress Scrubber
+
+/// The song's progress, laid over the bottom of the cover: a thin line, which grows and shows
+/// the elapsed and remaining time while the pointer is over the cover. Click or drag to seek.
+struct ProgressScrubber: View {
+    let track: TrackInfo
+    let expanded: Bool
+    let onSeek: (Double) -> Void
+
+    @State private var dragFraction: Double?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            let duration = max(track.duration, 0.1)
+            let fraction = dragFraction ?? min(1, max(0, track.estimatedPosition(at: context.date) / duration))
+            let barHeight: CGFloat = expanded || dragFraction != nil ? 4 : 2.5
+
+            VStack(spacing: 2) {
+                GeometryReader { geo in
+                    let width = max(geo.size.width, 1)
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.28))
+                        Capsule().fill(Color.white.opacity(0.92))
+                            .frame(width: width * fraction)
+                    }
+                    .frame(height: barHeight)
+                    .shadow(color: .black.opacity(0.35), radius: 1.5, y: 0.5)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { dragFraction = Self.clamp($0.location.x / width) }
+                            .onEnded { value in
+                                onSeek(Self.clamp(value.location.x / width) * duration)
+                                dragFraction = nil
+                            }
+                    )
+                }
+                .frame(height: 12)
+
+                if expanded {
+                    HStack {
+                        Text(Self.format(fraction * duration))
+                        Spacer()
+                        Text("-" + Self.format(duration - fraction * duration))
+                    }
+                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.85))
+                    .shadow(color: .black.opacity(0.5), radius: 1)
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: barHeight)
+        }
+        .help(expanded ? "" : "Song progress")
+    }
+
+    private static func clamp(_ value: Double) -> Double { min(1, max(0, value)) }
+
+    nonisolated static func format(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return total >= 3600
+            ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+            : String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
 
 struct MarqueeText: View {
     let text: String

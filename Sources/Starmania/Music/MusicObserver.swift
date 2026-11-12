@@ -25,11 +25,13 @@ class MusicObserver: ObservableObject {
     /// when these change, which interrupts the playing song — or, for the next song, which Music
     /// has already loaded for gapless playback, stops playback at the transition. So they wait
     /// until neither is playing or up next.
-    private(set) var pendingEdits: [String: PendingEdit] = [:]
+    @Published private(set) var pendingEdits: [String: PendingEdit] = [:]
 
     struct PendingEdit: Equatable {
         var year: Int?
         var genre: String?
+
+        var isEmpty: Bool { year == nil && genre == nil }
 
         var scriptBody: String {
             var lines: [String] = []
@@ -38,7 +40,9 @@ class MusicObserver: ObservableObject {
                 let g = MusicObserver.escapeForAppleScript(genre)
                 lines.append("if genre of t is not \"\(g)\" then set genre of t to \"\(g)\"")
             }
-            return lines.joined(separator: "\n")
+            // AppleScript ignores case by default, so "rock" → "Rock" would look unchanged
+            guard !lines.isEmpty else { return "" }
+            return "considering case\n" + lines.joined(separator: "\n") + "\nend considering"
         }
     }
 
@@ -127,7 +131,8 @@ class MusicObserver: ObservableObject {
             if output.hasPrefix("ERROR") {
                 errorMessage = "Could not read track info"
             } else {
-                // Stopped or not playing
+                // Stopped or not playing: nothing is playing or preloaded, so waiting edits can go now
+                if !pendingEdits.isEmpty { Task { await flushPendingEdits() } }
                 currentTrack = nil
                 lastTrackKey = ""
                 errorMessage = nil
@@ -422,25 +427,35 @@ class MusicObserver: ObservableObject {
         guard let pid = resolvedID(trackID) else { return }
         let year = max(0, year)
         if isCurrent(trackID) { currentTrack?.year = year }
-        editAlbum(of: pid, property: "year", value: "\(year)") { $0.year = year }
+        editAlbum(of: pid, property: "year", value: "\(year)", pending: { $0.year = year }, clear: { $0.year = nil })
     }
 
     /// Set the genre on every track of the album (same deferral as the year).
     func setAlbumGenre(_ genre: String, trackID: String? = nil) {
         guard let pid = resolvedID(trackID) else { return }
         if isCurrent(trackID) { currentTrack?.genre = genre }
-        editAlbum(of: pid, property: "genre", value: "\"\(Self.escapeForAppleScript(genre))\"") { $0.genre = genre }
+        editAlbum(of: pid, property: "genre", value: "\"\(Self.escapeForAppleScript(genre))\"",
+                  pending: { $0.genre = genre }, clear: { $0.genre = nil })
     }
 
-    private func editAlbum(of pid: String, property: String, value: String, pending: @escaping (inout PendingEdit) -> Void) {
+    private func editAlbum(of pid: String, property: String, value: String,
+                           pending: @escaping (inout PendingEdit) -> Void,
+                           clear: @escaping (inout PendingEdit) -> Void) {
         let protected = [currentTrack?.persistentID ?? "", currentTrack?.nextPersistentID ?? ""].filter { !$0.isEmpty }
         let script = Self.trackScript(pid, Self.albumTracksBody(property: property, value: value, skipping: protected))
         editGeneration += 1
         Task {
             // The script returns the album tracks it skipped; they get the edit later
             let output = await runner.run(script) ?? ""
-            for skipped in Self.parseSkipped(output) {
-                pending(&pendingEdits[skipped, default: PendingEdit()])
+            let skipped = Self.parseSkipped(output)
+            for pid in skipped {
+                pending(&pendingEdits[pid, default: PendingEdit()])
+            }
+            // A protected track that already has the new value mustn't get an older waiting one
+            for pid in protected where output.hasPrefix("ok") && !skipped.contains(pid) {
+                guard var edit = pendingEdits[pid] else { continue }
+                clear(&edit)
+                pendingEdits[pid] = edit.isEmpty ? nil : edit
             }
             writeTick += 1
             requestPoll()
@@ -468,7 +483,10 @@ class MusicObserver: ObservableObject {
                 set skipped to {}
                 repeat with x in ts
                     try
-                        if \(property) of x is not \(value) then
+                        considering case
+                            set differs to (\(property) of x is not \(value))
+                        end considering
+                        if differs then
                             set xPID to persistent ID of x
                             if skipList contains xPID then
                                 set end of skipped to xPID
@@ -608,6 +626,14 @@ class MusicObserver: ObservableObject {
     func playPause() {
         currentTrack?.isPlaying.toggle()
         runWrite("tell application \"Music\" to playpause", repollAfter: 0.2)
+    }
+
+    /// Jump to a position in the playing song (seconds).
+    func seek(to seconds: Double) {
+        let target = max(0, seconds)
+        currentTrack?.position = target
+        currentTrack?.positionDate = Date()
+        runWrite("tell application \"Music\" to set player position to \(String(format: "%.2f", target))", repollAfter: 0.3)
     }
 
     func nextTrack() {
