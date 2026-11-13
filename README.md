@@ -23,12 +23,14 @@ A macOS menu bar app for Apple Music: rate and favorite songs, star albums, and 
 
 ### Where changes are stored
 
-| What | Local `.mp3` / `.m4a` file | Streaming track |
+| What | Local `.mp3` / `.m4a` file | Streaming, or iCloud-only (no file on this Mac) |
 |---|---|---|
 | Lyrics (plain or timed) | In the file's tag (ID3 `USLT` / MPEG-4 `©lyr`) | Music's library |
-| Artwork | In the file's tag | — |
+| Artwork | In the file's tag | Music's library (replacing a cover only: Music won't add one to a song that has none) |
 | Year, genre | Set in Music, which writes them into the file | Music's library |
 | Ratings, favorites, album star | Music's library (Music doesn't put these in files) | Music's library |
+
+On a second Mac that syncs the library through iCloud Music Library (Match), songs with no downloaded file are treated like streaming ones: lyrics go into Music's library, and no file tags are touched. The cloud badge next to the artist says which kind a song is.
 
 For local files Starmania reads lyrics and year straight from the file, so it shows what the file holds even before Music notices a change.
 
@@ -53,7 +55,7 @@ The script asks for an optional name suffix and whether to install into `/Applic
 
 Other options: `--suffix NAME`, `--zip` (also writes `dist/Starmania-<version>.zip`), `--clean` (flush the build cache first), `--help`.
 
-It builds on any Mac: it tries the default SDK first and falls back to the other installed SDKs if one can't build SwiftUI (some Command Line Tools SDKs lack SwiftUI's macro plugin). The build happens in `/private/tmp/Starmania_build`, outside synced folders such as Google Drive or iCloud.
+It builds on any Mac. Newer SDKs make SwiftUI's `@State` a macro whose plugin only ships with Xcode, so with just the Command Line Tools the script picks an installed SDK that doesn't need it (it says which one it skips), and only tries the others as a last resort. If every SDK fails it prints the first error of each and keeps full logs in `/private/tmp/Starmania_build/build-*.log`. If Google Drive drops the execute bit, run it as `bash build.sh`. The build happens in `/private/tmp/Starmania_build`, outside synced folders such as Google Drive or iCloud.
 
 The first launch asks for permission to control Music (System Settings → Privacy & Security → Automation).
 

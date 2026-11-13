@@ -216,6 +216,7 @@ private let RS = "\u{1E}"
 func appleScriptsCompile() throws {
     let scripts = [
         "poll": MusicObserver.pollScript,
+        "setArtwork": MusicObserver.trackScript("ABCDEF0123456789", MusicObserver.setArtworkBody(path: "/tmp/a \"b\".jpg")),
         "playlist": MusicObserver.playlistScript,
         "bulk": MusicObserver.bulkScript,
         "track": MusicObserver.trackScript("ABCDEF0123456789", "set rating of t to 60"),
@@ -396,6 +397,20 @@ private let adamGreenLRC = """
                   "AA", "2008", "Rock", "false", "0", "computed", "DEF", "/b.m4a"].joined(separator: US)
     let track = try #require(MusicObserver.parsePollOutput(output))
     #expect(track.nextPersistentID == "DEF" && track.nextFilePath == "/b.m4a")
+    #expect(track.cloudStatus.isEmpty && !track.isCloudOnly)
+}
+
+@Test func matchedTrackWithoutFileIsCloudOnly() throws {
+    // A second Mac syncing the library through Match: Music has no location for the track
+    let fields = ["playing", "ABC", "Song", "Artist", "Album", "false", "false", "60", "", "1", "200",
+                  "AA", "2008", "Rock", "false", "0", "computed", "", ""]
+    let matched = try #require(MusicObserver.parsePollOutput((fields + ["matched"]).joined(separator: US)))
+    #expect(!matched.isLocal && matched.isCloudOnly)
+    let streamed = try #require(MusicObserver.parsePollOutput((fields + ["subscription"]).joined(separator: US)))
+    #expect(!streamed.isLocal && !streamed.isCloudOnly)
+    let local = ["playing", "ABC", "Song", "Artist", "Album", "false", "false", "60", "/a.m4a", "1", "200",
+                 "AA", "2008", "Rock", "false", "0", "computed", "", "", "matched"].joined(separator: US)
+    #expect(try #require(MusicObserver.parsePollOutput(local)).isCloudOnly == false)
 }
 
 @Test func pendingEditScript() {

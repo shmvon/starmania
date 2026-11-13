@@ -3,6 +3,22 @@
 All notable changes to Starmania. Versions follow `MAJOR.MINOR` (with `.PATCH` for small fixes):
 a new major version changes how the app works, a minor one adds features, a patch only fixes things.
 
+## [Unreleased]
+
+### Fixed
+- `build.sh` on a Mac with only the Command Line Tools: SDKs whose SwiftUI needs the SwiftUIMacros plugin
+  (only in Xcode) are now skipped in favour of one that builds, and a total failure lists the first error per SDK.
+- The build dialog now comes to the front and puts the cursor in the name field, so typing no longer goes to Terminal;
+  typing a name selects "Custom name".
+
+### Added
+- "Save Artwork in Music" for songs without a file on this Mac (streaming, or iCloud-only). Music only lets
+  this replace an existing cover; for a song with no artwork at all it says so instead of failing silently.
+
+### Changed
+- Songs in your iCloud Music Library with no file on this Mac (a second Mac using Match) get their own iCloud badge
+  and tooltip, saying lyrics go into Music's library and file tags can't be edited.
+
 ## [3.0.2] — 2026-11-12
 
 ### Fixed

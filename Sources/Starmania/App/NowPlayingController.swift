@@ -302,7 +302,17 @@ final class NowPlayingController: ObservableObject {
     }
 
     private func writeArtwork(_ data: Data, to track: TrackInfo) async {
-        guard let path = track.filePath else { return }
+        guard let path = track.filePath else {
+            // No file on this Mac: Music's library is the only place for it
+            guard !data.isEmpty else { return }
+            if await music.setArtwork(data, trackID: track.persistentID) {
+                showStatus("Artwork → Music ✓")
+            } else {
+                if isCurrent(track) { artworkUnsaved = true }
+                showStatus("Music can't add artwork to a song without a file on this Mac", isError: true)
+            }
+            return
+        }
         let deleting = data.isEmpty
         do {
             let deferred = try await writeOrDefer(path: path, lyrics: nil, artwork: data)

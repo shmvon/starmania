@@ -23,11 +23,28 @@ for dir in "$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/S
     while IFS= read -r sdk; do SDKS+=("$dir/$sdk"); done < <(ls "$dir" | grep -E '^MacOSX[0-9.]+\.sdk$' | sort -t X -k 2 -V -r)
 done
 
+# SDKs whose SwiftUI needs the SwiftUIMacros plugin (Xcode only) go last, as in build.sh
+SWIFTC_DIR=$(dirname "$(xcrun -f swiftc 2>/dev/null || command -v swiftc)")
+needs_missing_plugin() {
+    grep -qs 'type: "StateMacro"' "$1"/System/Library/Frameworks/SwiftUICore.framework/Versions/A/Modules/SwiftUICore.swiftmodule/*-apple-macos.swiftinterface || return 1
+    local d
+    for d in "$SWIFTC_DIR/../lib/swift/host/plugins" "$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" "$1/usr/lib/swift/host/plugins"; do
+        ls "$d"/*SwiftUIMacros* >/dev/null 2>&1 && return 1
+    done
+    return 0
+}
+
 TRIED=""
+FIRST=()
+LAST=()
 for sdk in "${SDKS[@]}"; do
     real=$(cd "$sdk" 2>/dev/null && pwd -P) || continue
     case " $TRIED " in *" $real "*) continue ;; esac
     TRIED="$TRIED $real"
+    if needs_missing_plugin "$real"; then LAST+=("$real"); else FIRST+=("$real"); fi
+done
+
+for sdk in ${FIRST[@]+"${FIRST[@]}"} ${LAST[@]+"${LAST[@]}"}; do
     echo "Using SDK: $sdk"
     if SDKROOT="$sdk" swift build --build-tests "${ARGS[@]}"; then
         echo "$sdk" > "$REMEMBERED"

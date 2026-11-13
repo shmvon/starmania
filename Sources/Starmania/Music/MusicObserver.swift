@@ -232,6 +232,10 @@ class MusicObserver: ObservableObject {
                 set aRat to album rating of t
                 set aKind to album rating kind of t as string
             end try
+            set cStat to ""
+            try
+                set cStat to cloud status of t as string
+            end try
             set nPID to ""
             set nLoc to ""
             try
@@ -245,7 +249,7 @@ class MusicObserver: ObservableObject {
                     end try
                 end if
             end try
-            return pState & US & (persistent ID of t) & US & (name of t) & US & (artist of t) & US & (album of t) & US & (favorited of t as string) & US & (disliked of t as string) & US & (rating of t as string) & US & loc & US & (pos as string) & US & (dur as string) & US & aa & US & (yr as string) & US & gn & US & (aFav as string) & US & (aRat as string) & US & aKind & US & nPID & US & nLoc
+            return pState & US & (persistent ID of t) & US & (name of t) & US & (artist of t) & US & (album of t) & US & (favorited of t as string) & US & (disliked of t as string) & US & (rating of t as string) & US & loc & US & (pos as string) & US & (dur as string) & US & aa & US & (yr as string) & US & gn & US & (aFav as string) & US & (aRat as string) & US & aKind & US & nPID & US & nLoc & US & cStat
         on error errMsg
             return "ERROR" & errMsg
         end try
@@ -285,6 +289,9 @@ class MusicObserver: ObservableObject {
         if parts.count >= 19 {
             track.nextPersistentID = parts[17]
             track.nextFilePath = parts[18].isEmpty ? nil : parts[18]
+        }
+        if parts.count >= 20 {
+            track.cloudStatus = parts[19]
         }
         return track
     }
@@ -579,6 +586,29 @@ class MusicObserver: ObservableObject {
         let ratings = parts[2].isEmpty ? [] : parts[2].components(separatedBy: RS).map { (Int($0) ?? 0) / 20 }
         guard favs.count == ratings.count else { return nil }
         return AlbumStats(trackCount: favs.count, favoritedCount: favs.filter { $0 }.count, ratings: ratings, favorited: favs)
+    }
+
+    /// Store artwork in Music's library, for tracks without a local file (streaming, or iCloud-only on
+    /// a second Mac). Music only lets scripts replace an existing cover on such tracks, not add a first one.
+    /// Returns false when Music refused.
+    func setArtwork(_ data: Data, trackID: String) async -> Bool {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("starmania-artwork-\(UUID().uuidString)")
+        guard (try? data.write(to: file)) != nil else { return false }
+        defer { try? FileManager.default.removeItem(at: file) }
+        editGeneration += 1
+        let result = await runner.run(Self.trackScript(trackID, Self.setArtworkBody(path: file.path)))
+        writeTick += 1
+        requestPoll()
+        return result == "ok"
+    }
+
+    /// `read` runs in Starmania (not Music), and "JPEG picture" also takes PNG data.
+    nonisolated static func setArtworkBody(path: String) -> String {
+        """
+        tell current application to set img to read (POSIX file "\(escapeForAppleScript(path))") as JPEG picture
+                set data of artwork 1 of t to img
+                return "ok"
+        """
     }
 
     func deleteArtwork() {

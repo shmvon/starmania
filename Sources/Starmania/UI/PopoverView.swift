@@ -170,10 +170,10 @@ struct PopoverView: View {
                 .lineLimit(1)
             HStack(spacing: 4) {
                 if !track.isLocal {
-                    Image(systemName: "cloud")
+                    Image(systemName: track.isCloudOnly ? "icloud" : "cloud")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
-                        .help("Streaming")
+                        .help(track.storageDescription)
                 }
                 Text(track.album.isEmpty ? track.artist : "\(track.artist) — \(track.album)")
                     .font(.system(size: 11.5))
@@ -297,13 +297,11 @@ struct PopoverView: View {
             .disabled(track.artworkData == nil)
         Button("Fetch Artwork", action: controller.fetchArtwork)
             .disabled(controller.artworkLoading)
-        if track.isLocal {
-            Button("Save Artwork to File", action: controller.writeArtworkToFile)
-                .disabled(track.artworkData == nil || !controller.artworkUnsaved)
-            Divider()
-            Button("Delete Artwork", role: .destructive, action: controller.deleteArtwork)
-                .disabled(track.artworkData == nil)
-        }
+        Button(track.isLocal ? "Save Artwork to File" : "Save Artwork in Music", action: controller.writeArtworkToFile)
+            .disabled(track.artworkData == nil || !controller.artworkUnsaved)
+        Divider()
+        Button("Delete Artwork", role: .destructive, action: controller.deleteArtwork)
+            .disabled(track.artworkData == nil)
     }
 
     /// Dragging the cover gives a PNG file named after the album (to Finder, Mail, editors, …).

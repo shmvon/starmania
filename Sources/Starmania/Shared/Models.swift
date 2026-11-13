@@ -26,8 +26,22 @@ struct TrackInfo: Equatable {
     var fileTags: MetadataWriter.FileTags?  // Read from the file itself (local tracks)
     var nextPersistentID: String = ""      // The song after this one in the current playlist, if known
     var nextFilePath: String?
+    var cloudStatus: String = ""  // Music's cloud status: "matched", "uploaded", "purchased", "subscription", …
 
     var isLocal: Bool { filePath != nil }
+
+    /// In the user's own iCloud Music Library (Match, upload, purchase) but with no file on this Mac,
+    /// e.g. a second Mac that syncs the library: tags can't be edited, only Music's database.
+    var isCloudOnly: Bool {
+        !isLocal && ["matched", "uploaded", "purchased"].contains(cloudStatus.lowercased())
+    }
+
+    /// Where edits to this track end up, for the panel's cloud badge.
+    var storageDescription: String {
+        if isLocal { return "Local file" }
+        if isCloudOnly { return "In your iCloud Music Library, no file on this Mac: lyrics go into Music's library, file tags can't be edited" }
+        return "Streaming: lyrics go into Music's library"
+    }
 
     /// Identifies the album across its tracks: album artist (or artist) plus album title.
     var albumKey: String {

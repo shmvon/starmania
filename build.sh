@@ -12,6 +12,8 @@ set -e
 
 BASE_APP_NAME="Starmania"
 WORKSPACE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Double-clicking (or running it from elsewhere) starts in another folder; SwiftPM needs the package folder
+cd "$WORKSPACE_DIR"
 VERSION=$(tr -d '[:space:]' < "$WORKSPACE_DIR/VERSION")
 BUILD_NUMBER=$(git -C "$WORKSPACE_DIR" rev-list --count HEAD 2>/dev/null || echo 1)
 
@@ -43,90 +45,107 @@ echo "Starmania $VERSION (build $BUILD_NUMBER)"
 if [ "$USE_DIALOG" = true ]; then
     # Suffix selection & installation destination dialog box
     echo "Prompting for build options..."
-    DIALOG_RESULT=$(osascript -e "
-    use framework \"AppKit\"
-    use framework \"Foundation\"
-    use scripting additions
-    
-    on run
-        set computerName to do shell script \"scutil --get LocalHostName 2>/dev/null || hostname -s 2>/dev/null || echo Mac\"
-        
-        set mainAlert to current application's NSAlert's alloc()'s init()
-        mainAlert's setMessageText:\"Build $BASE_APP_NAME\"
-        mainAlert's setInformativeText:\"As the app will only work on the system on which it was built and can't be shared without the source files, adding a suffix to each build is recommended.\"
-        
-        mainAlert's addButtonWithTitle:\"Build\"
-        mainAlert's addButtonWithTitle:\"Cancel\"
-        
-        set containerView to current application's NSView's alloc()'s initWithFrame:(current application's NSMakeRect(0, 0, 400, 140))
-        
-        -- 1. Computer Name
-        set radioComputer to current application's NSButton's alloc()'s initWithFrame:(current application's NSMakeRect(0, 110, 390, 22))
-        radioComputer's setButtonType:(current application's NSRadioButton)
-        radioComputer's setTitle:(\"Computer name (\" & computerName & \")\")
-        radioComputer's setState:1
-        radioComputer's setTarget:me
-        radioComputer's setAction:\"radioClicked:\"
-        containerView's addSubview:radioComputer
-        
-        -- 2. Custom Name + Text Field
-        set radioCustom to current application's NSButton's alloc()'s initWithFrame:(current application's NSMakeRect(0, 80, 115, 22))
-        radioCustom's setButtonType:(current application's NSRadioButton)
-        radioCustom's setTitle:\"Custom name:\"
-        radioCustom's setState:0
-        radioCustom's setTarget:me
-        radioCustom's setAction:\"radioClicked:\"
-        containerView's addSubview:radioCustom
-        
-        set customField to current application's NSTextField's alloc()'s initWithFrame:(current application's NSMakeRect(120, 80, 260, 22))
-        customField's setPlaceholderString:\"Enter custom suffix\"
-        containerView's addSubview:customField
-        
-        -- 3. No Suffix
-        set radioNoSuffix to current application's NSButton's alloc()'s initWithFrame:(current application's NSMakeRect(0, 50, 390, 22))
-        radioNoSuffix's setButtonType:(current application's NSRadioButton)
-        radioNoSuffix's setTitle:\"No suffix\"
-        radioNoSuffix's setState:0
-        radioNoSuffix's setTarget:me
-        radioNoSuffix's setAction:\"radioClicked:\"
-        containerView's addSubview:radioNoSuffix
-        
-        -- 4. Checkbox: Install into Applications folder
-        set checkbox to current application's NSButton's alloc()'s initWithFrame:(current application's NSMakeRect(0, 10, 390, 22))
-        checkbox's setButtonType:(current application's NSSwitchButton)
-        checkbox's setTitle:\"Install into Applications folder (/Applications)\"
-        checkbox's setState:0
-        containerView's addSubview:checkbox
-        
-        mainAlert's setAccessoryView:containerView
-        
-        current application's NSApp's activateIgnoringOtherApps:true
-        set response to mainAlert's runModal()
-        
-        if response is 1000 then
-            if (radioComputer's state() as integer is 1) then
-                set choice to \"Computer Name\"
-                set customVal to \"\"
-            else if (radioCustom's state() as integer is 1) then
-                set choice to \"Custom Name\"
-                set customVal to (customField's stringValue() as string)
-            else
-                set choice to \"No Suffix\"
-                set customVal to \"\"
-            end if
+    COMPUTER_NAME=$(scutil --get LocalHostName 2>/dev/null || hostname -s 2>/dev/null || echo "Mac")
+    read -r -d '' DIALOG_SCRIPT <<'APPLESCRIPT' || true
+use framework "AppKit"
+use framework "Foundation"
+use scripting additions
+
+property radioComputer : missing value
+property radioCustom : missing value
+property radioNoSuffix : missing value
+property customField : missing value
+
+on run argv
+    set appName to item 1 of argv
+    set computerName to item 2 of argv
+
+    set mainAlert to current application's NSAlert's alloc()'s init()
+    mainAlert's setMessageText:("Build " & appName)
+    mainAlert's setInformativeText:"As the app will only work on the system on which it was built and can't be shared without the source files, adding a suffix to each build is recommended."
+    mainAlert's addButtonWithTitle:"Build"
+    mainAlert's addButtonWithTitle:"Cancel"
+
+    set containerView to current application's NSView's alloc()'s initWithFrame:(current application's NSMakeRect(0, 0, 400, 140))
+
+    set radioComputer to my makeRadio("Computer name (" & computerName & ")", 110, 390, 1)
+    containerView's addSubview:radioComputer
+
+    set radioCustom to my makeRadio("Custom name:", 80, 115, 0)
+    containerView's addSubview:radioCustom
+
+    set customField to current application's NSTextField's alloc()'s initWithFrame:(current application's NSMakeRect(120, 80, 260, 22))
+    customField's setPlaceholderString:"Enter custom suffix"
+    customField's setDelegate:me
+    containerView's addSubview:customField
+
+    set radioNoSuffix to my makeRadio("No suffix", 50, 390, 0)
+    containerView's addSubview:radioNoSuffix
+
+    set checkbox to current application's NSButton's alloc()'s initWithFrame:(current application's NSMakeRect(0, 10, 390, 22))
+    checkbox's setButtonType:(current application's NSSwitchButton)
+    checkbox's setTitle:"Install into Applications folder (/Applications)"
+    checkbox's setState:0
+    containerView's addSubview:checkbox
+
+    mainAlert's setAccessoryView:containerView
+    mainAlert's layout()
+    -- Typing goes straight into the name field (and picks "Custom name")
+    mainAlert's |window|()'s setInitialFirstResponder:customField
+
+    -- osascript runs in the background: macOS refuses AppKit's own activation request
+    -- (so keystrokes kept going to Terminal), but honours the AppleScript activate command
+    current application's NSApplication's sharedApplication()'s setActivationPolicy:(current application's NSApplicationActivationPolicyAccessory)
+    activate
+    set response to mainAlert's runModal()
+
+    if response is 1000 then
+        if (radioCustom's state() as integer is 1) then
+            set choice to "Custom Name"
+        else if (radioNoSuffix's state() as integer is 1) then
+            set choice to "No Suffix"
         else
-            set choice to \"Cancel\"
-            set customVal to \"\"
+            set choice to "Computer Name"
         end if
-        
-        set installToApps to (checkbox's state() as integer is 1)
-        
-        return (choice & \"|\" & (installToApps as string) & \"|\" & customVal)
-    end run
-    
-    on radioClicked:sender
-    end radioClicked:
-    " 2>/dev/null || echo "Cancel|false|")
+    else
+        set choice to "Cancel"
+    end if
+    set customVal to ""
+    if choice is "Custom Name" then set customVal to (customField's stringValue() as text)
+    set installToApps to (checkbox's state() as integer is 1)
+    return (choice & "|" & (installToApps as text) & "|" & customVal)
+end run
+
+on makeRadio(title, y, w, isOn)
+    set b to current application's NSButton's alloc()'s initWithFrame:(current application's NSMakeRect(0, y, w, 22))
+    b's setButtonType:(current application's NSRadioButton)
+    b's setTitle:title
+    b's setState:isOn
+    b's setTarget:me
+    b's setAction:"radioClicked:"
+    return b
+end makeRadio
+
+on selectRadio(chosen)
+    repeat with b in {radioComputer, radioCustom, radioNoSuffix}
+        if (b's isEqual:chosen) as boolean then
+            (b's setState:1)
+        else
+            (b's setState:0)
+        end if
+    end repeat
+end selectRadio
+
+on radioClicked:sender
+    my selectRadio(sender)
+    if (sender's isEqual:radioCustom) as boolean then customField's |window|()'s makeFirstResponder:customField
+end radioClicked:
+
+on controlTextDidChange:aNotification
+    my selectRadio(radioCustom)
+end controlTextDidChange:
+APPLESCRIPT
+    DIALOG_RESULT=$(osascript -e "$DIALOG_SCRIPT" "$BASE_APP_NAME" "$COMPUTER_NAME" 2>/dev/null || echo "Cancel|false|")
 
     # Check if user cancelled
     CHOICE=$(echo "$DIALOG_RESULT" | cut -d'|' -f1)
@@ -198,15 +217,33 @@ mkdir -p "$RESOURCES_DIR"
 
 export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 
-# Pick an SDK that builds. Some SDKs from the Command Line Tools lack SwiftUI's macro plugin,
-# so each installed SDK is tried in turn: SDKROOT if set, the one that worked last time, the default, then newest first.
+# Pick an SDK that builds. Newer SDKs make SwiftUI's @State a macro, whose plugin (SwiftUIMacros)
+# ships with Xcode but not with the Command Line Tools, so such SDKs can't build on a Mac without Xcode.
+# Order: SDKROOT if set, the one that worked last time, the default, then newest first;
+# SDKs that need a missing plugin go last (still tried, in case the check is wrong).
+DEVELOPER_DIR_PATH=$(xcode-select -p 2>/dev/null || true)
+SWIFTC_DIR=$(dirname "$(xcrun -f swiftc 2>/dev/null || command -v swiftc)")
+has_swiftui_macros() {  # $1 = SDK path
+    local d
+    for d in "$SWIFTC_DIR/../lib/swift/host/plugins" \
+             "$DEVELOPER_DIR_PATH/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" \
+             "$1/usr/lib/swift/host/plugins"; do
+        ls "$d"/*SwiftUIMacros* >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+needs_missing_plugin() {  # $1 = SDK path
+    grep -qs 'type: "StateMacro"' "$1"/System/Library/Frameworks/SwiftUICore.framework/Versions/A/Modules/SwiftUICore.swiftmodule/*-apple-macos.swiftinterface \
+        && ! has_swiftui_macros "$1"
+}
+
 SDK_CANDIDATES=()
 [ -n "$SDKROOT" ] && SDK_CANDIDATES+=("$SDKROOT")
 REMEMBERED_SDK="$BUILD_PATH/.working-sdk"
 [ -f "$REMEMBERED_SDK" ] && SDK_CANDIDATES+=("$(cat "$REMEMBERED_SDK")")
 DEFAULT_SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)
 [ -n "$DEFAULT_SDK" ] && SDK_CANDIDATES+=("$DEFAULT_SDK")
-for dir in "$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/SDKs" \
+for dir in "$DEVELOPER_DIR_PATH/Platforms/MacOSX.platform/Developer/SDKs" \
            "/Library/Developer/CommandLineTools/SDKs"; do
     [ -d "$dir" ] || continue
     while IFS= read -r sdk; do
@@ -214,23 +251,47 @@ for dir in "$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/S
     done < <(ls "$dir" | grep -E '^MacOSX[0-9.]+\.sdk$' | sort -t X -k 2 -V -r)
 done
 
-echo "Compiling release build via Swift PM (deployment target macOS $DEPLOYMENT_TARGET)..."
-BUILT=false
-TRIED=""
+# Drop duplicates (MacOSX.sdk and MacOSX27.sdk are often links to the same SDK), then sort
+USABLE_SDKS=()
+LAST_RESORT_SDKS=()
+SEEN=""
 for sdk in "${SDK_CANDIDATES[@]}"; do
     real=$(cd "$sdk" 2>/dev/null && pwd -P) || continue
-    case " $TRIED " in *" $real "*) continue ;; esac
-    TRIED="$TRIED $real"
+    case " $SEEN " in *" $real "*) continue ;; esac
+    SEEN="$SEEN $real"
+    if needs_missing_plugin "$real"; then
+        echo "Skipping $(basename "$real") for now: its SwiftUI needs the SwiftUIMacros plugin, which only Xcode has."
+        LAST_RESORT_SDKS+=("$real")
+    else
+        USABLE_SDKS+=("$real")
+    fi
+done
+
+echo "Compiling release build via Swift PM (deployment target macOS $DEPLOYMENT_TARGET)..."
+BUILT=false
+FAILURES=""
+mkdir -p "$BUILD_PATH"
+for sdk in ${USABLE_SDKS[@]+"${USABLE_SDKS[@]}"} ${LAST_RESORT_SDKS[@]+"${LAST_RESORT_SDKS[@]}"}; do
     echo "Using SDK: $sdk"
-    if SDKROOT="$sdk" swift build -c release --disable-sandbox --build-path "$BUILD_PATH"; then
+    LOG="$BUILD_PATH/build-$(basename "$sdk" .sdk).log"
+    if SDKROOT="$sdk" swift build -c release --disable-sandbox --package-path "$WORKSPACE_DIR" --build-path "$BUILD_PATH" 2>&1 | tee "$LOG"; [ "${PIPESTATUS[0]}" -eq 0 ]; then
         echo "$sdk" > "$REMEMBERED_SDK"
         BUILT=true
         break
     fi
+    FIRST_ERROR=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -m1 -E 'error:' | sed 's/^.*error: //')
+    FAILURES="$FAILURES\n  $(basename "$sdk"): ${FIRST_ERROR:-see $LOG}"
     echo "Build with this SDK failed; trying the next one..."
 done
 if [ "$BUILT" != true ]; then
-    echo "Error: the build failed with every installed SDK."
+    if [ -z "$FAILURES" ]; then
+        echo "Error: no macOS SDK found. Install Xcode or run: xcode-select --install"
+    else
+        echo "Error: the build failed with every installed SDK. First error per SDK:"
+        echo -e "$FAILURES"
+        echo "Full logs: $BUILD_PATH/build-*.log"
+        echo "If every SDK needs SwiftUIMacros, install Xcode, or an older Command Line Tools SDK."
+    fi
     rm -rf "$STAGING_DIR"
     exit 1
 fi
